@@ -55,223 +55,298 @@ const PRECONDITIONER_SWEEPS = 5
 
 """
 function calRHS!(wk::WorkBuffers,
-    Δh::Tuple{Float64, Float64, Float64},
-    Δt::Float64,
-    ΔZ::Vector{Float64},
+    Δh::NTuple{3,T},
+    Δt::T,
+    ΔZ::AbstractVector{T},
     bc_set::BoundaryConditionSet,
-    qsrf::Array{Float64,2},
+    qsrf::AbstractArray{T,2},
     par::String;
-    is_steady::Bool=false
-    )
+    is_steady::Bool=false) where {T <: AbstractFloat}
 
-    backend = get_backend(par)
-    SZ = size(wk.b)
-    dx0::Float64 = Δh[1]
-    dy0::Float64 = Δh[2]
-    hfon = false
+  backend = get_backend(par)
+  SZ = size(wk.b)
+  dx0 = Δh[1]
+  dy0 = Δh[2]
+  hfon = false
 
-    #@floop backend for k in 1:SZ[3], j in 1:SZ[2], i in 1:SZ[1]
-    #    wk.b[i,j,k] = 0.0
-    #end
+  # 境界条件をRHSに適用（熱流束・対流条件を含む）
+  apply_bc2RHS!(wk.b, wk.θ, dx0, dy0, ΔZ, bc_set, par)
 
-    # 領域境界面に一様な熱流束の場合
-    apply_bc2RHS!(wk.b, wk.θ, dx0, dy0, ΔZ, bc_set, par)
-
-
-    # IHCPの場合、Z方向のみ分布を考慮した熱流束
-    # Z_plus
-    if hfon == true
-        let k=2, area = dx0 * dy0
-            @floop backend for j in 2:SZ[2]-1, i in 2:SZ[1]-1
-                wk.b[i,j,k] -= qsrf[i,j] * area
-            end
-        end
+  # 分布熱流束（IHCPモード）
+  if hfon == true
+    let k=2, area = dx0 * dy0
+      @floop backend for j in 2:SZ[2]-1, i in 2:SZ[1]-1
+        wk.b[i,j,k] -= qsrf[i,j] * area
+      end
     end
+  end
 
-    # RHS（体積積分形式）
-    @floop backend for k in 2:SZ[3]-1, j in 2:SZ[2]-1, i in 2:SZ[1]-1
-        dz_k = ΔZ[k]
-        # 時間項（体積積分形式） - 定常解析の場合は0
-        a_p_0 = is_steady ? 0.0 : wk.ρ[i,j,k] * wk.cp[i,j,k] * dx0 * dy0 * dz_k / Δt
-        # RHS = 時間項 × 前の温度 + 熱源項 + 境界条件項
-        wk.b[i,j,k] = -(a_p_0 * wk.θ[i,j,k] + wk.hsrc[i,j,k] * dx0 * dy0 * dz_k + wk.b[i,j,k])
-    end
-
+  # RHS最終計算
+  ddt = inv(Δt)
+  @floop backend for k in 2:SZ[3]-1, j in 2:SZ[2]-1, i in 2:SZ[1]-1
+    dz_k = ΔZ[k]
+    a_p_0 = is_steady ? zero(T) : wk.ρ[i,j,k] * wk.cp[i,j,k] * dx0 * dy0 * dz_k * ddt
+    wk.b[i,j,k] = -(a_p_0 * wk.θ[i,j,k] + wk.hsrc[i,j,k] * dx0 * dy0 * dz_k + wk.b[i,j,k])
+  end
 end
 
 
 """
-@brief CG反復（前処理付き）
-@param [in,out] wk      ワークベクトル
-@param [in]     Δh      セル幅
-@param [in]     Δt      時間積分幅
-@param [in]     ZC      CVセンター座標
-@param [in]     ΔZ      CV幅
-@param [in]     smoother ["gs", ""]
-@param [in]     F       ファイルディスクリプタ
-@param [in]     tol     収束判定基準
-@param [in]     par     バックエンド
+@brief PCG反復（前処理付き共役勾配法）
+
+@param [in,out] wk       ワークベクトル
+@param [in]     Δh       セル幅
+@param [in]     Δt       時間積分幅
+@param [in]     ZC       CVセンター座標
+@param [in]     ΔZ       CV幅
+@param [in]     HC       熱伝達係数 [h_xm, h_xp, h_ym, h_yp, h_zm, h_zp]
+
+# キーワード引数
+@param [in]     tol      反復閾値
+@param [in]     maxItr   最大反復数
+@param [in]     smoother [:none, :gs]
+@param [in]     par      バックエンド（"sequential", "thread"）
+@param [in]     verbose  詳細出力フラグ
 @param [in]     is_steady 定常解析フラグ
-@ret                    残差RMS
+
+収束判定： 相対残差ノルム (||r_k|| / ||r_0||) < tol
+@ret            収束/未収束、反復回数、初期残差
 """
 function CG!(wk::WorkBuffers,
-            Δh::Tuple{Float64, Float64, Float64},
-            Δt::Float64,
-            ZC::Vector{Float64},
-            ΔZ::Vector{Float64},
-            smoother::String,
-            F,
-            tol,
-            par::String;
-            is_steady::Bool=false)
-    backend = get_backend(par)
-    SZ = size(wk.θ)
+             Δh::NTuple{3,T},
+             Δt::T,
+             ZC::AbstractVector{T},
+             ΔZ::AbstractVector{T},
+             HC::AbstractVector{T};
+             tol::T = T(1e-6),
+             maxItr::Int = 20_000,
+             smoother::Symbol = :none,
+             par::String = "sequential",
+             verbose::Bool = false,
+             is_steady::Bool = false) where {T <: AbstractFloat}
+  backend = get_backend(par)
+  SZ = size(wk.θ)
 
-    # 初期残差を計算: r = b - Ax
-    res0 = CalcRK!(wk.pcg_r, wk.θ, wk.b, wk.λ, wk.mask, wk.ρ, wk.cp, Δh, Δt, ZC, ΔZ, par, is_steady=is_steady)
-    println("Inital residual = ", res0)
+  # 初期残差を計算: r = b - Ax
+  myfill!(wk.pcg_q, zero(T), par)
+  res0 = CalcRK!(wk.pcg_r, wk.θ, wk.b, wk.λ, wk.mask, wk.ρ, wk.cp,
+                 Δh, Δt, ZC, ΔZ, HC, par, is_steady=is_steady)
+  if verbose
+    println("Initial residual = ", res0)
+  end
 
-    # 前処理: z = M^-1 * r (pcg_sをzとして使用)
-    wk.pcg_s .= 0.0
-    Preconditioner!(wk.pcg_s, wk.pcg_r, wk.λ, wk.mask, Δh, Δt, smoother, ZC, ΔZ, par)
+  # 初期残差がゼロの場合は収束済み（数値安定性対策）
+  if res0 ≈ zero(T)
+    return true, 0, res0
+  end
 
-    # p = z
-    wk.pcg_p .= wk.pcg_s
+  # Smoother選択: Symbol → Val型変換（コンパイル時分岐解決）
+  smoother_val = smoother_selector(smoother)
 
-    # rho_old = (r, z)
-    rho_old = Fdot2(wk.pcg_r, wk.pcg_s, par)
+  # 前処理: z = M^-1 * r (pcg_sをzとして使用)
+  myfill!(wk.pcg_s, zero(T), par)
+  Preconditioner!(wk.pcg_s, wk.pcg_r, wk.λ, wk.mask, wk.ρ, wk.cp, Δh, Δt,
+                  smoother_val, ZC, ΔZ, HC, par, is_steady=is_steady)
 
-    for itr in 1:ItrMax
-        # q = A * p
-        CalcAX!(wk.pcg_q, wk.pcg_p, Δh, Δt, wk.λ, wk.mask, wk.ρ, wk.cp, ZC, ΔZ, par, is_steady=is_steady)
+  # p = z
+  mycopy!(wk.pcg_p, wk.pcg_s, par)
 
-        # alpha = rho_old / (p, q)
-        alpha = rho_old / Fdot2(wk.pcg_p, wk.pcg_q, par)
+  # rho_old = (r, z)
+  rho_old::T = Fdot2(wk.pcg_r, wk.pcg_s, par)
+  isconverged::Bool = false
+  itr::Int = 0
+  float_min_T = T(FloatMin)
 
-        # x = x + alpha * p, r = r - alpha * q
-        @floop backend for k in 2:SZ[3]-1, j in 2:SZ[2]-1, i in 2:SZ[1]-1
-            wk.θ[i,j,k] += alpha * wk.pcg_p[i,j,k]
-            wk.pcg_r[i,j,k] -= alpha * wk.pcg_q[i,j,k]
-        end
+  for k in 1:maxItr
+    itr = k
 
-        # 残差チェック
-        res = sqrt(Fdot1(wk.pcg_r, par))
-        res /= res0
+    # q = A * p
+    CalcAX!(wk.pcg_q, wk.pcg_p, Δh, Δt, wk.λ, wk.mask, wk.ρ, wk.cp,
+            ZC, ΔZ, HC, par, is_steady=is_steady)
 
-        @printf(F, "%10d %24.14E\n", itr, res)
-        @printf(stdout, "%10d %24.14E\n", itr, res)
+    # 分母ゼロ対策（数値安定性）
+    denom = Fdot2(wk.pcg_p, wk.pcg_q, par)
+    if abs(denom) < float_min_T
+      # 分母がゼロに近い場合は数値的に不安定（未収束として扱う）
+      isconverged = false
+      break
+    end
 
-        if res < tol
-            println("Converged at ", itr)
-            break
-        end
+    # alpha = rho_old / (p, q)
+    alpha::T = rho_old / denom
 
-        # 前処理: z = M^-1 * r
-        wk.pcg_s .= 0.0
-        Preconditioner!(wk.pcg_s, wk.pcg_r, wk.λ, wk.mask, Δh, Δt, smoother, ZC, ΔZ, par)
+    # x = x + alpha * p, r = r - alpha * q
+    @floop backend for kk in 2:SZ[3]-1, j in 2:SZ[2]-1, i in 2:SZ[1]-1
+      wk.θ[i,j,kk] += alpha * wk.pcg_p[i,j,kk]
+      wk.pcg_r[i,j,kk] -= alpha * wk.pcg_q[i,j,kk]
+    end
 
-        # rho_new = (r, z)
-        rho_new = Fdot2(wk.pcg_r, wk.pcg_s, par)
+    # 残差チェック
+    res = sqrt(Fdot1(wk.pcg_r, par))
+    res /= res0
 
-        # beta = rho_new / rho_old
-        beta = rho_new / rho_old
+    if verbose
+      @printf("%10d %24.14E\n", itr, res)
+    end
 
-        # p = z + beta * p
-        @floop backend for k in 2:SZ[3]-1, j in 2:SZ[2]-1, i in 2:SZ[1]-1
-            wk.pcg_p[i,j,k] = wk.pcg_s[i,j,k] + beta * wk.pcg_p[i,j,k]
-        end
+    if res < tol
+      isconverged = true
+      if verbose
+        println("Converged at ", itr)
+      end
+      break
+    end
 
-        rho_old = rho_new
-    end # itr
-    @printf(stdout, "\n")
+    # 前処理: z = M^-1 * r
+    myfill!(wk.pcg_s, zero(T), par)
+    Preconditioner!(wk.pcg_s, wk.pcg_r, wk.λ, wk.mask, wk.ρ, wk.cp, Δh, Δt,
+                    smoother_val, ZC, ΔZ, HC, par, is_steady=is_steady)
+
+    # rho_new = (r, z)
+    rho_new = Fdot2(wk.pcg_r, wk.pcg_s, par)
+
+    # rhoがゼロに近い場合は数値的に不安定（未収束として扱う）
+    if abs(rho_new) < float_min_T
+      isconverged = false
+      break
+    end
+
+    # beta = rho_new / rho_old
+    beta::T = rho_new / rho_old
+
+    # p = z + beta * p
+    @floop backend for kk in 2:SZ[3]-1, j in 2:SZ[2]-1, i in 2:SZ[1]-1
+      wk.pcg_p[i,j,kk] = wk.pcg_s[i,j,kk] + beta * wk.pcg_p[i,j,kk]
+    end
+
+    rho_old = rho_new
+  end # itr
+
+  return isconverged, itr, res0
 end
 
 """
 @brief PBiCGSTAB反復
 @param [in]     wk   ワークベクトル
-@param [in]     Δh     セル幅
-@param [in]     Δt     時間積分幅
+@param [in]     Δh   セル幅
+@param [in]     Δt   時間積分幅
 @param [in]     ZC   CVセンター座標
 @param [in]     ΔZ   CV幅
+@param [in]     HC   熱伝達係数 [h_xm, h_xp, h_ym, h_yp, h_zm, h_zp]
 
 # キーワード引数
-@param [in]     tol    反復閾値
-@param [in]     maxItr 最大反復数
-@param [in]     smoother ["gs", ""]
-@param [in]     par    バックエンド（"sequential", "thread"）
+@param [in]     tol      反復閾値
+@param [in]     maxItr   最大反復数
+@param [in]     smoother [:none, :gs]
+@param [in]     par      バックエンド（"sequential", "thread"）
+@param [in]     verbose  詳細出力フラグ
 @param [in]     is_steady 定常解析フラグ
 
+収束判定： 相対残差ノルム (||r_k|| / ||r_0||) < tol
 @ret            収束/未収束、反復回数、初期残差
 """
 function PBiCGSTAB!(wk::WorkBuffers,
-                    Δh::Tuple{Float64, Float64, Float64},
-                    Δt::Float64,
-                    ZC::Vector{Float64},
-                    ΔZ::Vector{Float64},
-                    smoother::String,
-                    F,
-                    tol::Float64,
-                    par::String;
-                    is_steady::Bool=false)
-    SZ = size(wk.θ)
-    wk.pcg_q .= 0.0  #fill!(pcg_q, 0.0)
-    res0 = CalcRK!(wk.pcg_r, wk.θ, wk.b, wk.λ, wk.mask, wk.ρ, wk.cp, Δh, Δt, ZC, ΔZ, par, is_steady=is_steady)
-    println("Inital residual = ", res0)
-    wk.pcg_r0 .= wk.pcg_r  #copy!(pcg_r0, pcg_r)
+                    Δh::NTuple{3,T},
+                    Δt::T,
+                    ZC::AbstractVector{T},
+                    ΔZ::AbstractVector{T},
+                    HC::AbstractVector{T};
+                    tol::T = T(1e-6),
+                    maxItr::Int = 20_000,
+                    smoother::Symbol = :none,
+                    par::String = "sequential",
+                    verbose::Bool = false,
+                    is_steady::Bool = false) where {T <: AbstractFloat}
 
-    rho_old::Float64 = 1.0
-    alpha::Float64 = 0.0
-    omega::Float64  = 1.0
-    r_omega::Float64 = -omega
-    beta::Float64 = 0.0
+  SZ = size(wk.θ)
+  myfill!(wk.pcg_q, zero(T), par)
+  res0 = CalcRK!(wk.pcg_r, wk.θ, wk.b, wk.λ, wk.mask, wk.ρ, wk.cp,
+                 Δh, Δt, ZC, ΔZ, HC, par, is_steady=is_steady)
 
-    for itr in 1:ItrMax
-        rho = Fdot2(wk.pcg_r, wk.pcg_r0, par) # 非計算部分はゼロのこと
+  if verbose
+    println("Initial residual = ", res0)
+  end
 
-        if abs(rho) < FloatMin
-            itr = 0
-            break
-        end
+  if res0 ≈ zero(T)
+    return true, 0, res0
+  end
 
-        if itr == 1
-            wk.pcg_p .= wk.pcg_r  #copy!(pcg_p, pcg_r)
-        else
-            beta = rho / rho_old * alpha / omega
-            BiCG1!(wk.pcg_p, wk.pcg_r, wk.pcg_q, beta, omega, par)
-        end
+  mycopy!(wk.pcg_r0, wk.pcg_r, par)
 
-        wk.pcg_p_ .= 0.0  #fill!(pcg_p_, 0.0)
-        Preconditioner!(wk.pcg_p_, wk.pcg_p, wk.λ, wk.mask, Δh, Δt, smoother, ZC, ΔZ, par)
+  rho_old::T = one(T)
+  alpha::T = zero(T)
+  omega::T = one(T)
+  r_omega::T = -omega
+  beta::T = zero(T)
+  isconverged::Bool = false
+  itr::Int = 0
 
-        CalcAX!(wk.pcg_q, wk.pcg_p_, Δh, Δt, wk.λ, wk.mask, wk.ρ, wk.cp, ZC, ΔZ, par, is_steady=is_steady)
-        alpha = rho / Fdot2(wk.pcg_q, wk.pcg_r0, par)
-        r_alpha = -alpha
-        Triad!(wk.pcg_s, wk.pcg_q, wk.pcg_r, r_alpha, par)
+  smoother_val = smoother_selector(smoother)
+  float_min_T = T(FloatMin)
 
-        wk.pcg_s_ .= 0.0  #fill!(pcg_s_, 0.0)
-        Preconditioner!(wk.pcg_s_, wk.pcg_s, wk.λ, wk.mask, Δh, Δt, smoother, ZC, ΔZ, par);
+  for k in 1:maxItr
+    itr = k
+    rho = Fdot2(wk.pcg_r, wk.pcg_r0, par)
 
-        CalcAX!(wk.pcg_t_, wk.pcg_s_, Δh, Δt, wk.λ, wk.mask, wk.ρ, wk.cp, ZC, ΔZ, par, is_steady=is_steady)
-        omega = Fdot2(wk.pcg_t_, wk.pcg_s,  par) / Fdot1(wk.pcg_t_, par)
-        r_omega = -omega
+    if abs(rho) < float_min_T
+      isconverged = false
+      break
+    end
 
-        BICG2!(wk.θ, wk.pcg_p_, wk.pcg_s_, alpha , omega, par)
+    if k == 1
+      mycopy!(wk.pcg_p, wk.pcg_r, par)
+    else
+      beta = rho / rho_old * alpha / omega
+      BiCG1!(wk.pcg_p, wk.pcg_r, wk.pcg_q, beta, omega, par)
+    end
 
-        Triad!(wk.pcg_r, wk.pcg_t_, wk.pcg_s, r_omega, par)
-        res = sqrt(Fdot1(wk.pcg_r, par))
-        res /= res0
-        #println(itr, " ", res)
-        @printf(F, "%10d %24.14E\n", itr, res) # 時間計測の場合にはコメントアウト
-        @printf(stdout, "%10d %24.14E\n", itr, res) # 時間計測の場合にはコメントアウト
+    myfill!(wk.pcg_p_, zero(T), par)
+    Preconditioner!(wk.pcg_p_, wk.pcg_p, wk.λ, wk.mask, wk.ρ, wk.cp, Δh, Δt,
+                    smoother_val, ZC, ΔZ, HC, par, is_steady=is_steady)
 
-        if res<tol
-            println("Converged at ", itr)
-            break
-        end
+    CalcAX!(wk.pcg_q, wk.pcg_p_, Δh, Δt, wk.λ, wk.mask, wk.ρ, wk.cp,
+            ZC, ΔZ, HC, par, is_steady=is_steady)
+    alpha = rho / Fdot2(wk.pcg_q, wk.pcg_r0, par)
+    r_alpha = -alpha
+    Triad!(wk.pcg_s, wk.pcg_q, wk.pcg_r, r_alpha, par)
 
-        rho_old = rho
-    end # itr
-    @printf(stdout, "\n")
+    myfill!(wk.pcg_s_, zero(T), par)
+    Preconditioner!(wk.pcg_s_, wk.pcg_s, wk.λ, wk.mask, wk.ρ, wk.cp, Δh, Δt,
+                    smoother_val, ZC, ΔZ, HC, par, is_steady=is_steady)
+
+    CalcAX!(wk.pcg_t_, wk.pcg_s_, Δh, Δt, wk.λ, wk.mask, wk.ρ, wk.cp,
+            ZC, ΔZ, HC, par, is_steady=is_steady)
+
+    denom = Fdot1(wk.pcg_t_, par)
+    if abs(denom) < float_min_T
+      isconverged = false
+      break
+    end
+    omega = Fdot2(wk.pcg_t_, wk.pcg_s, par) / denom
+    r_omega = -omega
+
+    BICG2!(wk.θ, wk.pcg_p_, wk.pcg_s_, alpha, omega, par)
+
+    Triad!(wk.pcg_r, wk.pcg_t_, wk.pcg_s, r_omega, par)
+    res = sqrt(Fdot1(wk.pcg_r, par))
+    res /= res0
+
+    if verbose
+      @printf("%10d %24.14E\n", itr, res)
+    end
+
+    if res < tol
+      isconverged = true
+      if verbose
+        println("Converged at ", itr)
+      end
+      break
+    end
+
+    rho_old = rho
+  end
+
+  return isconverged, itr, res0
 end
 
 

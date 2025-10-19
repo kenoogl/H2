@@ -183,7 +183,9 @@ end
 
 function find_k(Z::Vector{Float64}, zc, nz)
 
-    if zc<Z[1] || zc>Z[nz]
+    # 浮動小数点誤差を考慮した範囲チェック
+    eps_tol = 1e-12
+    if zc < Z[1] - eps_tol || zc > Z[nz] + eps_tol
         println("out of scope in Z : find_z()")
         println(zc, " ", round(Z[nz],digits=8))
         exit()
@@ -193,6 +195,11 @@ function find_k(Z::Vector{Float64}, zc, nz)
         if Z[k] ≤ zc < Z[k+1]
             return k
         end
+    end
+
+    # zcがZ[nz]とほぼ等しい場合（浮動小数点誤差を考慮）
+    if abs(zc - Z[nz]) < eps_tol
+        return nz - 1
     end
 end
 

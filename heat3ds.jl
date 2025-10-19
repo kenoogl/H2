@@ -18,6 +18,7 @@ using .Common: WorkBuffers, ItrMax, Q_src, get_backend
 using .NonUniform
 using .NonUniform: PBiCGSTAB!, CG!, calRHS!
 using .RHSCore
+using .BoundaryConditions
 
 """
 Mode3用の境界条件（NonUniform格子のIC問題）  
@@ -104,45 +105,58 @@ end
 @param [in] is_steady 定常解析フラグ
 """
 function main(Δh, Δt, wk, ZC, ΔZ, ID, solver, smoother, bc_set, par; is_steady::Bool=false)
-    # 収束履歴の初期化
-    conv_data = ConvergenceData(solver, smoother)
+  # 収束履歴の初期化
+  conv_data = ConvergenceData(solver, smoother)
 
-    SZ = size(wk.θ)
+  SZ = size(wk.θ)
 
-    qsrf = zeros(Float64, SZ[1], SZ[2])
+  qsrf = zeros(Float64, SZ[1], SZ[2])
 
-    HeatSrc!(wk.hsrc, ID, par)
+  HeatSrc!(wk.hsrc, ID, par)
 
+  # HC配列を生成（境界条件から）
+  HC = BoundaryConditions.set_BC_coef(bc_set)
 
-    F = open("log.txt", "w")
-    conditions(F, SZ, Δh, solver, smoother)
-    time::Float64 = 0.0
-    nt::Int64 = 1
+  F = open("log.txt", "w")
+  conditions(F, SZ, Δh, solver, smoother)
+  time::Float64 = 0.0
+  nt::Int64 = 1
 
-    for step in 1:nt
-        time += Δt
+  for step in 1:nt
+    time += Δt
 
-        calRHS!(wk, Δh, Δt, ΔZ, bc_set, qsrf, par, is_steady=is_steady)
+    calRHS!(wk, Δh, Δt, ΔZ, bc_set, qsrf, par, is_steady=is_steady)
 
-        if solver=="cg"
-            CG!(wk, Δh, Δt, ZC, ΔZ, smoother, F, itr_tol, par, is_steady=is_steady)
-        else
-            PBiCGSTAB!(wk, Δh, Δt, ZC, ΔZ, smoother, F, itr_tol, par, is_steady=is_steady)
-        end
-
-        s = @view wk.θ[2:SZ[1]-1, 2:SZ[2]-1, 2:SZ[3]-1]
-        min_val = minimum(s)
-        max_val = maximum(s)
-        @printf(F, "%d %f : θmin=%e  θmax=%e  L2 norm of θ=%e\n", step, time, min_val, max_val, norm(s,2))
+    # ソルバー呼び出しを修正
+    if solver == "cg"
+      smoother_sym = smoother == "gs" ? :gs : :none
+      isconverged, itr, res0 = NonUniform.CG!(wk, Δh, Δt, ZC, ΔZ, HC,
+                                   tol=itr_tol, smoother=smoother_sym,
+                                   par=par, verbose=true, is_steady=is_steady)
+    else
+      smoother_sym = smoother == "gs" ? :gs : :none
+      isconverged, itr, res0 = NonUniform.PBiCGSTAB!(wk, Δh, Δt, ZC, ΔZ, HC,
+                                          tol=itr_tol, smoother=smoother_sym,
+                                          par=par, verbose=true, is_steady=is_steady)
     end
 
-    close(F)
+    if !isconverged
+      @warn "Solver did not converge at step $(step)"
+    end
 
-    # ログファイルから残差データを解析してconv_dataに追加
-    parse_residuals_from_log!(conv_data, "log.txt")
+    s = @view wk.θ[2:SZ[1]-1, 2:SZ[2]-1, 2:SZ[3]-1]
+    min_val = minimum(s)
+    max_val = maximum(s)
+    @printf(F, "%d %f : θmin=%e  θmax=%e  L2 norm of θ=%e\n", step, time, min_val, max_val, norm(s,2))
+  end
 
-    # 収束履歴データを返す
-    return conv_data
+  close(F)
+
+  # ログファイルから残差データを解析してconv_dataに追加
+  parse_residuals_from_log!(conv_data, "log.txt")
+
+  # 収束履歴データを返す
+  return conv_data
 end
 
 #=
