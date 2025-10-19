@@ -68,13 +68,25 @@ julia run.jl
 
 ```bash
 # コマンドライン引数で指定
-julia run.jl NX NY NZ solver smoother epsilon par is_steady
+julia run.jl NX NY NZ solver smoother epsilon par [is_steady]
 
-# 例: 240x240x30グリッド、PBiCGSTAB、GS、ε=1e-4、並列、定常解析
-julia run.jl 240 240 30 pbicgstab gs 1e-4 thread true
+# 例: 240x240x30グリッド、PBiCGSTAB、GS、ε=1e-4、逐次、定常解析
+julia run.jl 240 240 30 pbicgstab gs 1e-4 sequential true
 
 # 例: 小グリッド、CG、スムーザーなし、ε=1e-6、逐次、非定常解析
 julia run.jl 40 40 30 cg "" 1e-6 sequential false
+```
+
+### 並列実行
+
+```bash
+# 4スレッドで並列実行
+julia -t 4 run.jl 240 240 30 pbicgstab gs 1e-4 thread true
+
+# 8スレッドで並列実行
+julia -t 8 run.jl 240 240 30 pbicgstab gs 1e-4 thread true
+
+# 注意: par="thread"の場合、julia -t N で起動してください
 ```
 
 ### Julia REPLから実行
