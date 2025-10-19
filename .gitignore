@@ -1,0 +1,32 @@
+# 出力ファイル
+output/
+results/
+
+# Juliaの一時ファイル
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+deps/deps.jl
+
+# ログファイル
+log.txt
+output.log
+
+# 画像ファイル（個別に追加する場合は除外）
+*.png
+*.jpg
+*.pdf
+
+# CSVファイル
+*.csv
+
+# OS固有
+.DS_Store
+Thumbs.db
+
+# エディタ
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
