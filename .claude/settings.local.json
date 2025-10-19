@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(julia:*)",
+      "Read(//Users/Daily/Development/Heat3ds/**)",
+      "Read(//Users/Daily/Development/IHCP/TrialClaudeMCPCodex/julia/src/solvers/**)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
