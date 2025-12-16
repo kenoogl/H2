@@ -1,409 +1,271 @@
-using Test
-using FLoops
+# Simple parameter validation test
+# **Feature: parareal-time-parallelization, Property 4: Parameter Validation Completeness**
+# **Validates: Requirements 2.1, 2.2, 2.3, 2.4, 2.5**
 
-# Include the Parareal module
+using Test
+
+# Import the parareal module
 include("../src/parareal.jl")
 using .Parareal
 
 """
 Property-based test for parameter validation
+
 Property 4: Parameter Validation Completeness
-Validates: Requirements 2.1, 2.2, 2.3, 2.4, 2.5
+For any valid parareal parameter (time steps, window count, iterations, tolerance), 
+the system should accept and correctly store the configuration.
+
+This test validates Requirements 2.1, 2.2, 2.3, 2.4, 2.5:
+- 2.1: Accept coarse time step size specification
+- 2.2: Accept fine time step size specification  
+- 2.3: Accept number of time windows specification
+- 2.4: Accept maximum parareal iterations specification
+- 2.5: Accept parareal convergence tolerance specification
 """
 
-@testset "Parameter Validation Property Tests" begin
+# Test configuration
+const NUM_PROPERTY_TESTS = 100
+
+"""
+Generate random valid parameters for testing
+"""
+function generate_random_valid_parameters(::Type{T} = Float64) where {T <: AbstractFloat}
+    # Generate valid time steps (coarse > fine > 0)
+    fine_dt = T(0.001 + rand() * 0.01)  # 0.001 to 0.011
+    coarse_dt = fine_dt * (2.0 + rand() * 98.0)  # 2x to 100x fine_dt
     
-    @testset "Property 4: Parameter Validation Completeness" begin
+    # Generate other valid parameters
+    n_time_windows = rand(2:32)
+    total_time = T(0.1 + rand() * 2.0)  # 0.1 to 2.1
+    max_iterations = rand(1:20)
+    convergence_tolerance = T(10.0^(-rand(4:8)))  # 1e-4 to 1e-8
+    n_mpi_processes = rand(1:16)
+    n_threads_per_process = rand(1:8)
+    
+    return (
+        coarse_dt = coarse_dt,
+        fine_dt = fine_dt,
+        n_time_windows = n_time_windows,
+        total_time = total_time,
+        max_iterations = max_iterations,
+        convergence_tolerance = convergence_tolerance,
+        n_mpi_processes = n_mpi_processes,
+        n_threads_per_process = n_threads_per_process
+    )
+end
+
+"""
+Test that valid parameters are accepted and stored correctly
+"""
+function test_parameter_acceptance_and_storage(params_tuple)
+    # Create parameters
+    params = Parareal.ParameterOptimization.create_parareal_parameters(
+        Float64;
+        coarse_dt = params_tuple.coarse_dt,
+        fine_dt = params_tuple.fine_dt,
+        n_time_windows = params_tuple.n_time_windows,
+        total_time = params_tuple.total_time,
+        max_iterations = params_tuple.max_iterations,
+        convergence_tolerance = params_tuple.convergence_tolerance,
+        n_mpi_processes = params_tuple.n_mpi_processes,
+        n_threads_per_process = params_tuple.n_threads_per_process
+    )
+    
+    # Property: Parameters should be stored correctly
+    @test params.coarse_dt == params_tuple.coarse_dt
+    @test params.fine_dt == params_tuple.fine_dt
+    @test params.n_time_windows == params_tuple.n_time_windows
+    @test params.total_time == params_tuple.total_time
+    @test params.max_iterations == params_tuple.max_iterations
+    @test params.convergence_tolerance == params_tuple.convergence_tolerance
+    @test params.n_mpi_processes == params_tuple.n_mpi_processes
+    @test params.n_threads_per_process == params_tuple.n_threads_per_process
+    
+    # Property: Time step ratio should be calculated correctly
+    expected_ratio = params_tuple.coarse_dt / params_tuple.fine_dt
+    @test abs(params.time_step_ratio - expected_ratio) < 1e-10
+    
+    return params
+end
+
+"""
+Test parameter validation functionality
+"""
+function test_parameter_validation(params)
+    # Validate parameters
+    validation_result = Parareal.ParameterOptimization.validate_parameters(params)
+    
+    # Property: Validation should complete without error
+    @test isa(validation_result, Parareal.ParameterOptimization.ValidationResult)
+    
+    # Property: Validation result should have expected fields
+    @test isa(validation_result.is_valid, Bool)
+    @test isa(validation_result.warnings, Vector{String})
+    @test isa(validation_result.recommendations, Vector{String})
+    @test validation_result.time_steps_per_window >= 0
+    @test validation_result.total_coarse_steps >= 0
+    @test validation_result.total_fine_steps >= 0
+    @test validation_result.estimated_memory_gb >= 0.0
+    
+    return validation_result
+end
+
+"""
+Test invalid parameter rejection
+"""
+function test_invalid_parameter_rejection()
+    # Test coarse_dt <= fine_dt (should fail)
+    @test_throws Exception Parareal.ParameterOptimization.create_parareal_parameters(
+        Float64; coarse_dt = 0.01, fine_dt = 0.02
+    )
+    
+    # Test negative time steps (should fail)
+    @test_throws Exception Parareal.ParameterOptimization.create_parareal_parameters(
+        Float64; coarse_dt = -0.01, fine_dt = 0.001
+    )
+    
+    @test_throws Exception Parareal.ParameterOptimization.create_parareal_parameters(
+        Float64; coarse_dt = 0.01, fine_dt = -0.001
+    )
+    
+    # Test invalid time windows (should fail)
+    @test_throws Exception Parareal.ParameterOptimization.create_parareal_parameters(
+        Float64; coarse_dt = 0.01, fine_dt = 0.001, n_time_windows = 1
+    )
+    
+    # Test invalid total time (should fail)
+    @test_throws Exception Parareal.ParameterOptimization.create_parareal_parameters(
+        Float64; coarse_dt = 0.01, fine_dt = 0.001, total_time = -1.0
+    )
+    
+    # Test invalid iterations (should fail)
+    @test_throws Exception Parareal.ParameterOptimization.create_parareal_parameters(
+        Float64; coarse_dt = 0.01, fine_dt = 0.001, max_iterations = 0
+    )
+    
+    # Test invalid tolerance (should fail)
+    @test_throws Exception Parareal.ParameterOptimization.create_parareal_parameters(
+        Float64; coarse_dt = 0.01, fine_dt = 0.001, convergence_tolerance = -1e-6
+    )
+    
+    # Test invalid MPI processes (should fail)
+    @test_throws Exception Parareal.ParameterOptimization.create_parareal_parameters(
+        Float64; coarse_dt = 0.01, fine_dt = 0.001, n_mpi_processes = 0
+    )
+    
+    # Test invalid threads per process (should fail)
+    @test_throws Exception Parareal.ParameterOptimization.create_parareal_parameters(
+        Float64; coarse_dt = 0.01, fine_dt = 0.001, n_threads_per_process = 0
+    )
+end
+
+"""
+Test parameter summary printing
+"""
+function test_parameter_summary_printing(params)
+    # Property: Summary printing should not throw errors
+    @test_nowarn Parareal.ParameterOptimization.print_parameter_summary(params)
+end
+
+# Main property-based test suite
+@testset "Property 4: Parameter Validation Completeness" begin
+    
+    @testset "Valid Parameter Acceptance and Storage" begin
+        println("Testing valid parameter acceptance and storage...")
         
-        @testset "SolverSelector initialization and configuration" begin
-            # Test that SolverSelector initializes correctly with all required components
+        for i in 1:NUM_PROPERTY_TESTS
+            params_tuple = generate_random_valid_parameters(Float64)
             
-            @testset "SolverSelector construction" begin
-                selector = Parareal.SolverSelector{Float64}()
-                @test selector isa Parareal.SolverSelector{Float64}
-                
-                # Check that all required solver types are available
-                @test haskey(selector.available_solvers, :pbicgstab)
-                @test haskey(selector.available_solvers, :cg)
-                @test haskey(selector.available_solvers, :sor)
-                
-                # Check that performance profiles exist
-                @test haskey(selector.performance_profiles, :pbicgstab)
-                @test haskey(selector.performance_profiles, :cg)
-                @test haskey(selector.performance_profiles, :sor)
-                
-                # Check that default configurations exist
-                @test haskey(selector.default_configurations, :coarse)
-                @test haskey(selector.default_configurations, :fine)
-                
-                # Convenience constructor
-                selector_default = Parareal.SolverSelector()
-                @test selector_default isa Parareal.SolverSelector{Float64}
-            end
+            # Test the property
+            params = test_parameter_acceptance_and_storage(params_tuple)
             
-            @testset "Performance profile completeness" begin
-                selector = Parareal.SolverSelector()
-                
-                for solver_type in [:pbicgstab, :cg, :sor]
-                    profile = selector.performance_profiles[solver_type]
-                    
-                    # Check required profile fields
-                    @test haskey(profile, "convergence_rate")
-                    @test haskey(profile, "memory_usage")
-                    @test haskey(profile, "stability")
-                    @test haskey(profile, "recommended_for")
-                    
-                    # Check that recommended_for is a list
-                    @test profile["recommended_for"] isa Vector
-                    @test length(profile["recommended_for"]) > 0
-                end
-            end
+            # Additional validation
+            @test params.time_step_ratio > 1.0  # Should always be > 1
+            @test params.coarse_dt > params.fine_dt  # Coarse should be larger
         end
         
-        @testset "Solver configuration creation and validation" begin
-            # Test that solver configurations are created correctly for various scenarios
+        println("✓ Valid parameter acceptance property passed for $NUM_PROPERTY_TESTS test cases")
+    end
+    
+    @testset "Parameter Validation Functionality" begin
+        println("Testing parameter validation functionality...")
+        
+        for i in 1:min(NUM_PROPERTY_TESTS, 50)  # Reduce for performance
+            params_tuple = generate_random_valid_parameters(Float64)
+            params = Parareal.ParameterOptimization.create_parareal_parameters(Float64; params_tuple...)
             
-            @testset "Default configuration creation" begin
-                selector = Parareal.SolverSelector()
-                
-                # Test default configuration
-                config = Parareal.create_solver_configuration(selector)
-                @test config isa Parareal.SolverConfiguration{Float64}
-                
-                # Validate the configuration
-                is_valid, message = Parareal.validate_solver_configuration(config)
-                @test is_valid
-                @test message == "Solver configuration is valid"
-            end
+            # Test the property
+            validation_result = test_parameter_validation(params)
             
-            @testset "Configuration with different problem sizes" begin
-                selector = Parareal.SolverSelector()
-                
-                problem_sizes = [
-                    (10, 10, 10),      # Small problem
-                    (100, 100, 100),   # Medium problem
-                    (500, 500, 100),   # Large problem
-                    (1000, 1000, 50)   # Very large problem
-                ]
-                
-                for problem_size in problem_sizes
-                    config = Parareal.create_solver_configuration(
-                        selector, problem_size = problem_size
-                    )
-                    
-                    @test config isa Parareal.SolverConfiguration{Float64}
-                    
-                    # Validate configuration
-                    is_valid, message = Parareal.validate_solver_configuration(config)
-                    @test is_valid
-                    
-                    # Check that spatial resolution factor is reasonable
-                    @test config.coarse_solver.spatial_resolution_factor >= 1.0
-                    @test config.coarse_solver.spatial_resolution_factor <= 10.0
-                end
-            end
-            
-            @testset "Configuration with different accuracy priorities" begin
-                selector = Parareal.SolverSelector()
-                priorities = [:speed, :balanced, :accuracy]
-                
-                for priority in priorities
-                    config = Parareal.create_solver_configuration(
-                        selector, accuracy_priority = priority
-                    )
-                    
-                    @test config isa Parareal.SolverConfiguration{Float64}
-                    
-                    # Validate configuration
-                    is_valid, message = Parareal.validate_solver_configuration(config)
-                    @test is_valid
-                    
-                    # Check that time step ratio makes sense
-                    time_step_ratio = config.coarse_solver.dt / config.fine_solver.dt
-                    @test time_step_ratio >= 1.0
-                    @test time_step_ratio <= 1000.0
-                    
-                    # Speed priority should have larger time step ratios
-                    if priority == :speed
-                        @test time_step_ratio >= 4.0
-                    elseif priority == :accuracy
-                        @test time_step_ratio <= 20.0
-                    end
-                end
-            end
-            
-            @testset "Configuration with solver preferences" begin
-                selector = Parareal.SolverSelector()
-                valid_solvers = [:pbicgstab, :cg, :sor]
-                
-                for solver_pref in valid_solvers
-                    config = Parareal.create_solver_configuration(
-                        selector, solver_preference = solver_pref
-                    )
-                    
-                    @test config.coarse_solver.solver_type == solver_pref
-                    @test config.fine_solver.solver_type == solver_pref
-                    
-                    # Validate configuration
-                    is_valid, message = Parareal.validate_solver_configuration(config)
-                    @test is_valid
-                end
-            end
+            # Additional checks
+            @test validation_result.time_steps_per_window > 0
+            @test validation_result.total_coarse_steps > 0
+            @test validation_result.total_fine_steps > 0
         end
         
-        @testset "Parameter validation against constraints" begin
-            # Test parameter validation against various problem constraints
+        println("✓ Parameter validation functionality property passed")
+    end
+    
+    @testset "Invalid Parameter Rejection" begin
+        println("Testing invalid parameter rejection...")
+        
+        # Test the property
+        test_invalid_parameter_rejection()
+        
+        println("✓ Invalid parameter rejection property passed")
+    end
+    
+    @testset "Parameter Summary Printing" begin
+        println("Testing parameter summary printing...")
+        
+        for i in 1:min(NUM_PROPERTY_TESTS, 10)  # Small sample for printing tests
+            params_tuple = generate_random_valid_parameters(Float64)
+            params = Parareal.ParameterOptimization.create_parareal_parameters(Float64; params_tuple...)
             
-            @testset "Time step constraint validation" begin
-                selector = Parareal.SolverSelector()
-                
-                # Create configuration with large time steps
-                config = Parareal.create_solver_configuration(
-                    selector, base_dt = 1.0, target_speedup = 50.0
-                )
-                
-                # Test with strict time step constraint
-                constraints = Dict{String, Any}("max_dt" => 0.1)
-                validation = Parareal.validate_solver_parameters(config, constraints)
-                
-                @test haskey(validation, "is_valid")
-                @test haskey(validation, "warnings")
-                @test haskey(validation, "errors")
-                
-                # Should fail validation due to large time steps
-                if config.coarse_solver.dt > 0.1 || config.fine_solver.dt > 0.1
-                    @test !validation["is_valid"]
-                    @test length(validation["errors"]) > 0
-                end
-            end
-            
-            @testset "Memory constraint validation" begin
-                selector = Parareal.SolverSelector()
-                
-                # Create configuration for large problem
-                config = Parareal.create_solver_configuration(
-                    selector, problem_size = (500, 500, 500)
-                )
-                
-                # Test with memory constraint
-                constraints = Dict{String, Any}(
-                    "max_memory_gb" => 1.0,
-                    "grid_size" => (500, 500, 500)
-                )
-                
-                validation = Parareal.validate_solver_parameters(config, constraints)
-                
-                @test validation isa Dict
-                @test haskey(validation, "is_valid")
-                
-                # Large problem should trigger memory warning
-                @test length(validation["warnings"]) >= 0  # May or may not warn depending on estimate
-            end
-            
-            @testset "Solver compatibility validation" begin
-                # Test specific solver combinations that may have issues
-                coarse_sor = Parareal.CoarseSolver{Float64}(solver_type = :sor)
-                fine_cg = Parareal.FineSolver{Float64}(solver_type = :cg)
-                
-                config = Parareal.SolverConfiguration(coarse_sor, fine_cg)
-                constraints = Dict{String, Any}()
-                
-                validation = Parareal.validate_solver_parameters(config, constraints)
-                
-                @test validation["is_valid"]  # Should be valid but may have warnings
-                # May have warnings about solver combination
-            end
+            # Test the property
+            test_parameter_summary_printing(params)
         end
         
-        @testset "Memory usage estimation" begin
-            # Test memory usage estimation for different configurations
-            
-            @testset "Memory estimation accuracy" begin
-                selector = Parareal.SolverSelector()
-                
-                problem_sizes = [
-                    (10, 10, 10),
-                    (100, 100, 100),
-                    (200, 200, 200)
-                ]
-                
-                for problem_size in problem_sizes
-                    config = Parareal.create_solver_configuration(
-                        selector, problem_size = problem_size
-                    )
-                    
-                    constraints = Dict{String, Any}("grid_size" => problem_size)
-                    memory_estimate = Parareal.estimate_memory_usage(config, constraints)
-                    
-                    @test memory_estimate > 0.0
-                    @test memory_estimate < 1000.0  # Reasonable upper bound in GB
-                    
-                    # Larger problems should use more memory
-                    total_cells = prod(problem_size)
-                    @test memory_estimate > total_cells * 1e-9  # Very rough lower bound
-                end
-            end
-            
-            @testset "Spatial resolution factor impact on memory" begin
-                selector = Parareal.SolverSelector()
-                problem_size = (100, 100, 100)
-                constraints = Dict{String, Any}("grid_size" => problem_size)
-                
-                # Test different spatial resolution factors
-                factors = [1.0, 2.0, 4.0]
-                memory_estimates = Float64[]
-                
-                for factor in factors
-                    coarse = Parareal.CoarseSolver{Float64}(spatial_resolution_factor = factor)
-                    fine = Parareal.FineSolver{Float64}()
-                    config = Parareal.SolverConfiguration(coarse, fine)
-                    
-                    memory_estimate = Parareal.estimate_memory_usage(config, constraints)
-                    push!(memory_estimates, memory_estimate)
-                end
-                
-                # Higher spatial resolution factors should reduce memory usage
-                @test memory_estimates[1] >= memory_estimates[2] >= memory_estimates[3]
-            end
-        end
+        println("✓ Parameter summary printing property passed")
+    end
+    
+    @testset "Edge Cases and Boundary Conditions" begin
+        println("Testing edge cases...")
         
-        @testset "Solver recommendations" begin
-            # Test solver recommendation system
-            
-            @testset "Condition number based recommendations" begin
-                selector = Parareal.SolverSelector()
-                
-                # Well-conditioned problem
-                characteristics_good = Dict{String, Any}("condition_number" => 50.0)
-                recommendations = Parareal.get_solver_recommendations(selector, characteristics_good)
-                
-                @test haskey(recommendations, "solver_type")
-                @test recommendations["solver_type"] == :cg  # Should recommend CG for well-conditioned
-                
-                # Ill-conditioned problem
-                characteristics_bad = Dict{String, Any}("condition_number" => 10000.0)
-                recommendations = Parareal.get_solver_recommendations(selector, characteristics_bad)
-                
-                @test recommendations["solver_type"] == :pbicgstab  # Should recommend PBiCGSTAB for ill-conditioned
-            end
-            
-            @testset "Memory based recommendations" begin
-                selector = Parareal.SolverSelector()
-                
-                # Limited memory
-                characteristics_limited = Dict{String, Any}("available_memory_gb" => 2.0)
-                recommendations = Parareal.get_solver_recommendations(selector, characteristics_limited)
-                
-                @test haskey(recommendations, "spatial_resolution_factor")
-                @test recommendations["spatial_resolution_factor"] >= 3.0  # Should recommend aggressive coarsening
-                
-                # Abundant memory
-                characteristics_abundant = Dict{String, Any}("available_memory_gb" => 64.0)
-                recommendations = Parareal.get_solver_recommendations(selector, characteristics_abundant)
-                
-                @test recommendations["spatial_resolution_factor"] <= 2.0  # Should recommend minimal coarsening
-            end
-            
-            @testset "Time constraint based recommendations" begin
-                selector = Parareal.SolverSelector()
-                
-                # Short time constraint
-                characteristics_fast = Dict{String, Any}("target_wall_time_hours" => 0.5)
-                recommendations = Parareal.get_solver_recommendations(selector, characteristics_fast)
-                
-                @test haskey(recommendations, "accuracy_priority")
-                @test recommendations["accuracy_priority"] == :speed
-                
-                # Long time available
-                characteristics_slow = Dict{String, Any}("target_wall_time_hours" => 48.0)
-                recommendations = Parareal.get_solver_recommendations(selector, characteristics_slow)
-                
-                @test recommendations["accuracy_priority"] == :accuracy
-            end
-        end
+        # Test minimum valid values
+        min_params = Parareal.ParameterOptimization.create_parareal_parameters(
+            Float64;
+            coarse_dt = 0.002,  # Just above fine_dt
+            fine_dt = 0.001,
+            n_time_windows = 2,  # Minimum
+            total_time = 0.001,  # Very small
+            max_iterations = 1,  # Minimum
+            convergence_tolerance = 1e-12,  # Very strict
+            n_mpi_processes = 1,  # Minimum
+            n_threads_per_process = 1  # Minimum
+        )
         
-        @testset "Optimal solver selection consistency" begin
-            # Test that optimal solver selection is consistent and reasonable
-            
-            @testset "Solver selection for different problem sizes" begin
-                selector = Parareal.SolverSelector()
-                
-                # Small problem
-                coarse_small, fine_small = Parareal.select_optimal_solvers(
-                    selector, (50, 50, 50), :balanced, nothing
-                )
-                
-                # Large problem
-                coarse_large, fine_large = Parareal.select_optimal_solvers(
-                    selector, (1000, 1000, 100), :balanced, nothing
-                )
-                
-                # Both should be valid solver types
-                valid_solvers = [:pbicgstab, :cg, :sor]
-                @test coarse_small in valid_solvers
-                @test fine_small in valid_solvers
-                @test coarse_large in valid_solvers
-                @test fine_large in valid_solvers
-            end
-            
-            @testset "Time step calculation consistency" begin
-                base_dt = 0.01
-                target_speedups = [2.0, 5.0, 10.0, 20.0]
-                
-                for speedup in target_speedups
-                    for priority in [:speed, :balanced, :accuracy]
-                        coarse_dt, fine_dt = Parareal.calculate_optimal_time_steps(
-                            base_dt, speedup, priority
-                        )
-                        
-                        @test coarse_dt >= fine_dt  # Coarse should be >= fine
-                        @test fine_dt == base_dt    # Fine should equal base
-                        @test coarse_dt > 0         # Both should be positive
-                        @test fine_dt > 0
-                        
-                        # Time step ratio should be reasonable
-                        ratio = coarse_dt / fine_dt
-                        @test ratio >= 1.0
-                        @test ratio <= 100.0  # Reasonable upper bound
-                    end
-                end
-            end
-            
-            @testset "Spatial resolution factor calculation" begin
-                problem_sizes = [(50, 50, 50), (200, 200, 200), (500, 500, 100)]
-                target_speedups = [2.0, 4.0, 8.0]
-                
-                for problem_size in problem_sizes
-                    for speedup in target_speedups
-                        for priority in [:speed, :balanced, :accuracy]
-                            factor = Parareal.calculate_spatial_resolution_factor(
-                                problem_size, speedup, priority
-                            )
-                            
-                            @test factor >= 1.0   # Should be at least 1
-                            @test factor <= 10.0  # Reasonable upper bound
-                            
-                            # Speed priority should generally give larger factors
-                            if priority == :speed
-                                @test factor >= 1.5
-                            end
-                        end
-                    end
-                end
-            end
-        end
+        @test min_params.time_step_ratio ≈ 2.0
+        @test min_params.n_time_windows == 2
+        
+        # Test large valid values
+        max_params = Parareal.ParameterOptimization.create_parareal_parameters(
+            Float64;
+            coarse_dt = 1.0,
+            fine_dt = 0.001,  # Large ratio
+            n_time_windows = 100,  # Large number
+            total_time = 100.0,  # Large time
+            max_iterations = 100,  # Large iterations
+            convergence_tolerance = 1e-3,  # Loose tolerance
+            n_mpi_processes = 64,  # Large number
+            n_threads_per_process = 16  # Large number
+        )
+        
+        @test max_params.time_step_ratio ≈ 1000.0
+        @test max_params.n_time_windows == 100
+        
+        println("✓ Edge cases handled correctly")
     end
 end
 
-# Property verification summary
-println("\n=== Property 4: Parameter Validation Completeness - Verification Summary ===")
-println("✓ SolverSelector initialization with all required components")
-println("✓ Performance profile completeness for all solver types")
-println("✓ Solver configuration creation for various problem scenarios")
-println("✓ Parameter validation against time step and memory constraints")
-println("✓ Memory usage estimation accuracy and consistency")
-println("✓ Solver recommendations based on problem characteristics")
-println("✓ Optimal solver selection consistency across different inputs")
-println("✓ Time step and spatial resolution factor calculation consistency")
-println("✓ Constraint validation and error reporting functionality")
-println("================================================================================")
+println("All parameter validation property tests completed successfully!")

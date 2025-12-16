@@ -1,6 +1,7 @@
 using Test
 using LinearAlgebra
 using Statistics
+using MPI
 
 # Include the Parareal module
 include("../src/parareal.jl")

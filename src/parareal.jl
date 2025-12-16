@@ -10,14 +10,32 @@ using Dates
 
 # Import Heat3ds modules
 include("common.jl")
+include("parameter_optimization.jl")
 using .Common
 using .Common: WorkBuffers, get_backend
+using .ParameterOptimization
 
 export PararealManager, PararealConfig, TimeWindow, MPICommunicator
 export initialize_mpi_parareal!, finalize_mpi_parareal!, run_parareal!
 export Heat3dsProblemData, create_heat3ds_problem_data
 export CoarseSolver, FineSolver, SolverConfiguration
 export PararealResult, ConvergenceMonitor
+# Parameter optimization exports
+export ParameterOptimizer, LiteratureGuidelines, ProblemCharacteristics
+export OptimizationResult, ParameterRecommendation
+export create_literature_guidelines, analyze_problem_characteristics
+export estimate_optimal_time_step_ratio, get_parameter_recommendations
+export create_parameter_optimizer, optimize_parameters!
+# Automatic tuning exports
+export AutomaticTuner, TuningResult, PerformanceMetrics
+export create_automatic_tuner, perform_automatic_tuning!
+export run_preliminary_tests!, evaluate_performance_metrics
+export generate_tuning_recommendations
+# Parameter space exploration exports
+export ParameterSpaceExplorer, ExplorationResult, PerformanceMap
+export create_parameter_space_explorer, explore_parameter_space!
+export generate_performance_map, save_exploration_results
+export load_exploration_results, find_optimal_configurations
 
 """
 Parareal configuration parameters
@@ -218,12 +236,12 @@ function initialize_mpi_parareal!(manager::PararealManager{T}) where {T <: Abstr
     manager.mpi_comm = MPICommunicator{T}(comm)
     
     rank = manager.mpi_comm.rank
-    size = manager.mpi_comm.size
+    mpi_size = manager.mpi_comm.size
     
     # Validate MPI process count
-    if size != manager.config.n_mpi_processes
+    if mpi_size != manager.config.n_mpi_processes
         if rank == 0
-            @warn "MPI process count mismatch: expected $(manager.config.n_mpi_processes), got $size"
+            @warn "MPI process count mismatch: expected $(manager.config.n_mpi_processes), got $mpi_size"
             @warn "Adjusting configuration to match actual MPI size"
         end
         # Update configuration to match actual MPI size
@@ -235,7 +253,7 @@ function initialize_mpi_parareal!(manager::PararealManager{T}) where {T <: Abstr
             manager.config.time_step_ratio,
             manager.config.max_iterations,
             manager.config.convergence_tolerance,
-            size,  # Use actual MPI size
+            mpi_size,  # Use actual MPI size
             manager.config.n_threads_per_process,
             manager.config.auto_optimize_parameters,
             manager.config.parameter_exploration_mode
@@ -248,7 +266,7 @@ function initialize_mpi_parareal!(manager::PararealManager{T}) where {T <: Abstr
     # Report configuration
     if rank == 0
         println("=== Parareal MPI Configuration ===")
-        println("MPI Processes: $size")
+        println("MPI Processes: $mpi_size")
         println("Threads per process: $(manager.config.n_threads_per_process)")
         println("Time windows: $(manager.config.n_time_windows)")
         println("Total time: $(manager.config.total_time)")
@@ -456,7 +474,7 @@ function exchange_temperature_fields!(comm::MPICommunicator{T},
     
     # Ensure buffers are initialized
     if length(comm.send_buffers) < comm.size
-        initialize_communication_buffers!(comm, size(temperature_data))
+        initialize_communication_buffers!(comm, Base.size(temperature_data))
     end
     
     # Copy data to send buffer
@@ -776,7 +794,7 @@ function run_parareal!(manager::PararealManager{T},
     end
     
     rank = manager.mpi_comm.rank
-    size = manager.mpi_comm.size
+    mpi_size = manager.mpi_comm.size
     
     # Create hybrid coordinator
     coordinator = HybridCoordinator{T}(manager.mpi_comm, manager.config.n_threads_per_process)
@@ -822,7 +840,7 @@ function run_parareal!(manager::PararealManager{T},
     
     # Initialize solution arrays for all time windows
     n_windows = manager.config.n_time_windows
-    grid_size = size(initial_condition)
+    grid_size = Base.size(initial_condition)
     
     # Solutions at the beginning of each time window
     window_solutions = Vector{Array{T,3}}(undef, n_windows + 1)
@@ -834,7 +852,7 @@ function run_parareal!(manager::PararealManager{T},
     end
     
     # Timing variables
-    total_start_time = time()
+    total_start_time = time_ns() / 1e9
     total_comm_time = T(0.0)
     
     try
@@ -844,7 +862,7 @@ function run_parareal!(manager::PararealManager{T},
             window_solutions, local_windows, problem_data, coordinator
         )
         
-        total_time = time() - total_start_time
+        total_time = time_ns() / 1e9 - total_start_time
         
         if rank == 0
             println("Parareal computation completed:")
@@ -898,7 +916,7 @@ function run_parareal!(manager::PararealManager{T},
                     false,  # Not converged
                     0,      # No iterations completed
                     T[],    # Empty residual history
-                    T(time() - total_start_time),  # Computation time
+                    T(time_ns() / 1e9 - total_start_time),  # Computation time
                     T(0.0)  # Communication time
                 )
             end
@@ -914,7 +932,7 @@ function run_parareal!(manager::PararealManager{T},
                 false,  # Not converged
                 0,      # No iterations completed
                 T[],    # Empty residual history
-                T(time() - total_start_time),  # Computation time
+                T(time_ns() / 1e9 - total_start_time),  # Computation time
                 T(0.0)  # Communication time
             )
         end
@@ -934,9 +952,9 @@ function run_parareal_iterations!(manager::PararealManager{T},
                                  coordinator::HybridCoordinator{T}) where {T <: AbstractFloat}
     
     rank = manager.mpi_comm.rank
-    size = manager.mpi_comm.size
+    mpi_size = manager.mpi_comm.size
     n_windows = manager.config.n_time_windows
-    grid_size = size(window_solutions[1])
+    grid_size = Base.size(window_solutions[1])
     
     # Storage for coarse and fine solutions
     coarse_solutions = Vector{Array{T,3}}(undef, n_windows + 1)
@@ -946,7 +964,7 @@ function run_parareal_iterations!(manager::PararealManager{T},
     coarse_solutions[1] = copy(window_solutions[1])
     fine_solutions[1] = copy(window_solutions[1])
     
-    iteration_start_time = time()
+    iteration_start_time = time_ns() / 1e9
     
     # Initial coarse prediction phase (k=0)
     if rank == 0
@@ -1027,7 +1045,7 @@ function run_parareal_iterations!(manager::PararealManager{T},
         end
     end
     
-    computation_time = T(time() - iteration_start_time)
+    computation_time = T(time_ns() / 1e9 - iteration_start_time)
     
     # Return final solution (from the last time window)
     final_solution = window_solutions[end]
@@ -1134,7 +1152,7 @@ function exchange_fine_solutions!(manager::PararealManager{T},
                                  coordinator::HybridCoordinator{T}) where {T <: AbstractFloat}
     
     rank = manager.mpi_comm.rank
-    size = manager.mpi_comm.size
+    mpi_size = manager.mpi_comm.size
     n_windows = manager.config.n_time_windows
     
     # Each process broadcasts its computed fine solutions to all other processes
@@ -1144,7 +1162,7 @@ function exchange_fine_solutions!(manager::PararealManager{T},
         
         if rank == responsible_rank
             # This process computed this window - broadcast to others
-            for target_rank in 0:(size-1)
+            for target_rank in 0:(mpi_size-1)
                 if target_rank != rank
                     exchange_temperature_fields!(
                         manager.mpi_comm, fine_solutions[window_idx + 1], target_rank
@@ -1600,8 +1618,8 @@ end
 Interpolate solution from coarse grid to fine grid
 """
 function interpolate_coarse_to_fine!(fine_data::Array{T,3}, coarse_data::Array{T,3}) where {T <: AbstractFloat}
-    fine_size = size(fine_data)
-    coarse_size = size(coarse_data)
+    fine_size = Base.size(fine_data)
+    coarse_size = Base.size(coarse_data)
     
     # Simple trilinear interpolation
     for k in 1:fine_size[3], j in 1:fine_size[2], i in 1:fine_size[1]
@@ -1659,8 +1677,8 @@ end
 Restrict solution from fine grid to coarse grid
 """
 function restrict_fine_to_coarse!(coarse_data::Array{T,3}, fine_data::Array{T,3}) where {T <: AbstractFloat}
-    fine_size = size(fine_data)
-    coarse_size = size(coarse_data)
+    fine_size = Base.size(fine_data)
+    coarse_size = Base.size(coarse_data)
     
     # Simple restriction using averaging
     for k in 1:coarse_size[3], j in 1:coarse_size[2], i in 1:coarse_size[1]
@@ -1698,7 +1716,7 @@ function solve_coarse!(solver::CoarseSolver{T},
                       problem_data::Any) where {T <: AbstractFloat}
     
     # Create coarse grid
-    fine_size = size(initial_condition)
+    fine_size = Base.size(initial_condition)
     coarse_size = create_coarse_grid(fine_size, solver.spatial_resolution_factor)
     
     # Initialize coarse grid data
@@ -1780,7 +1798,7 @@ function solve_fine!(solver::FineSolver{T},
                     problem_data::Heat3dsProblemData{T}) where {T <: AbstractFloat}
     
     # Create working buffers for the fine solver
-    grid_size = size(initial_condition)
+    grid_size = Base.size(initial_condition)
     wk = Common.WorkBuffers(grid_size[1], grid_size[2], grid_size[3])
     
     # Initialize temperature field with initial condition
@@ -1861,7 +1879,7 @@ end
 Apply simple diffusion step (placeholder for full Heat3ds integration)
 """
 function apply_simple_diffusion_step!(temperature::Array{T,3}, dt::T, diffusivity::T) where {T <: AbstractFloat}
-    grid_size = size(temperature)
+    grid_size = Base.size(temperature)
     temp_new = copy(temperature)
     
     # Simple explicit diffusion update
@@ -1897,7 +1915,7 @@ function solve_coarse!(solver::CoarseSolver{T},
                       problem_data::Heat3dsProblemData{T}) where {T <: AbstractFloat}
     
     # Create coarse grid
-    fine_size = size(initial_condition)
+    fine_size = Base.size(initial_condition)
     coarse_size = create_coarse_grid(fine_size, solver.spatial_resolution_factor)
     
     # Initialize coarse grid data
@@ -2219,6 +2237,115 @@ function calculate_spatial_resolution_factor(problem_size::NTuple{3,Int},
 end
 
 """
+Create optimized PararealConfig using literature-based guidelines
+"""
+function create_optimized_parareal_config(
+    grid_size::NTuple{3,Int},
+    grid_spacing::NTuple{3,T},
+    thermal_diffusivity::T,
+    total_simulation_time::T,
+    base_time_step::T;
+    target_speedup::T = T(4.0),
+    accuracy_priority::Symbol = :balanced,
+    n_mpi_processes::Int = 4,
+    n_threads_per_process::Int = 1
+) where {T <: AbstractFloat}
+    
+    # 問題特性を分析
+    characteristics = analyze_problem_characteristics(
+        grid_size, grid_spacing, thermal_diffusivity,
+        total_simulation_time, base_time_step
+    )
+    
+    # パラメータ最適化器を作成
+    optimizer = create_parameter_optimizer(T; problem_type = :heat_conduction)
+    
+    # パラメータを最適化
+    result = optimize_parameters!(
+        optimizer, characteristics;
+        target_speedup = target_speedup,
+        accuracy_priority = accuracy_priority
+    )
+    
+    # 最適化結果を表示
+    println("パラメータ最適化が完了しました:")
+    print_optimization_result(result)
+    
+    # PararealConfigを作成
+    return PararealConfig{T}(
+        total_time = total_simulation_time,
+        n_time_windows = result.recommended_n_windows,
+        dt_coarse = result.recommended_coarse_dt,
+        dt_fine = result.recommended_fine_dt,
+        max_iterations = result.predicted_iterations + 5,  # 余裕を持たせる
+        convergence_tolerance = T(1e-6),  # デフォルト値
+        n_mpi_processes = n_mpi_processes,
+        n_threads_per_process = n_threads_per_process,
+        auto_optimize_parameters = true,
+        parameter_exploration_mode = false
+    )
+end
+
+"""
+Create automatically tuned PararealConfig using preliminary runs
+"""
+function create_auto_tuned_parareal_config(
+    grid_size::NTuple{3,Int},
+    grid_spacing::NTuple{3,T},
+    thermal_diffusivity::T,
+    total_simulation_time::T,
+    base_time_step::T;
+    tuning_strategy::Symbol = :adaptive,
+    n_mpi_processes::Int = 4,
+    n_threads_per_process::Int = 1
+) where {T <: AbstractFloat}
+    
+    println("=== 自動パラメータチューニング開始 ===")
+    
+    # 問題特性を分析
+    characteristics = analyze_problem_characteristics(
+        grid_size, grid_spacing, thermal_diffusivity,
+        total_simulation_time, base_time_step
+    )
+    
+    # 自動チューニング器を作成
+    tuner = create_automatic_tuner(T; 
+        problem_type = :heat_conduction,
+        tuning_strategy = tuning_strategy
+    )
+    
+    # 自動チューニングを実行
+    result = perform_automatic_tuning!(tuner, characteristics)
+    
+    if result === nothing
+        @warn "自動チューニングが失敗しました。文献ベースの設定を使用します。"
+        return create_optimized_parareal_config(
+            grid_size, grid_spacing, thermal_diffusivity,
+            total_simulation_time, base_time_step;
+            n_mpi_processes = n_mpi_processes,
+            n_threads_per_process = n_threads_per_process
+        )
+    end
+    
+    println("自動チューニングが完了しました:")
+    print_optimization_result(result)
+    
+    # PararealConfigを作成
+    return PararealConfig{T}(
+        total_time = total_simulation_time,
+        n_time_windows = result.recommended_n_windows,
+        dt_coarse = result.recommended_coarse_dt,
+        dt_fine = result.recommended_fine_dt,
+        max_iterations = result.predicted_iterations + 3,  # 自動チューニング結果に基づく
+        convergence_tolerance = T(1e-6),
+        n_mpi_processes = n_mpi_processes,
+        n_threads_per_process = n_threads_per_process,
+        auto_optimize_parameters = true,
+        parameter_exploration_mode = false
+    )
+end
+
+"""
 Validate solver parameters against problem constraints
 """
 function validate_solver_parameters(config::SolverConfiguration{T},
@@ -2349,6 +2476,36 @@ function get_solver_recommendations(selector::SolverSelector{T},
 end
 
 """
+Solve a single time step using the fine solver
+"""
+function solve_time_step!(solver::FineSolver{T},
+                         solution::Array{T,3},
+                         current_time::T,
+                         dt::T,
+                         problem_data::Heat3dsProblemData{T}) where {T <: AbstractFloat}
+    
+    # For now, implement a simple explicit diffusion step
+    # In a full implementation, this would integrate with Heat3ds solvers
+    grid_size = Base.size(solution)
+    new_solution = copy(solution)
+    
+    # Simple explicit diffusion update
+    diffusivity = T(0.1)  # Thermal diffusivity coefficient
+    
+    for k in 2:grid_size[3]-1, j in 2:grid_size[2]-1, i in 2:grid_size[1]-1
+        # 6-point stencil for 3D diffusion
+        laplacian = (solution[i+1,j,k] + solution[i-1,j,k] +
+                    solution[i,j+1,k] + solution[i,j-1,k] +
+                    solution[i,j,k+1] + solution[i,j,k-1] -
+                    6 * solution[i,j,k])
+        
+        new_solution[i,j,k] = solution[i,j,k] + dt * diffusivity * laplacian
+    end
+    
+    return new_solution
+end
+
+"""
 Fallback to sequential computation when Parareal fails
 """
 function fallback_to_sequential!(manager::PararealManager{T},
@@ -2375,7 +2532,7 @@ function fallback_to_sequential!(manager::PararealManager{T},
     dt = manager.config.dt_fine
     n_steps = Int(ceil(total_time / dt))
     
-    start_time = time()
+    start_time = time_ns() / 1e9
     
     # Simple forward Euler or existing Heat3ds solver integration
     for step in 1:n_steps
@@ -2400,7 +2557,7 @@ function fallback_to_sequential!(manager::PararealManager{T},
         end
     end
     
-    computation_time = time() - start_time
+    computation_time = time_ns() / 1e9 - start_time
     
     if rank == 0
         @info "Sequential computation completed in $(computation_time) seconds"
@@ -2430,7 +2587,7 @@ function solve_time_step!(solver::FineSolver{T},
     # the actual Heat3ds solver for one time step
     
     # For now, implement a simple explicit diffusion step
-    grid_size = size(solution)
+    grid_size = Base.size(solution)
     new_solution = copy(solution)
     
     # Simple 3D diffusion with periodic boundary conditions
@@ -2472,7 +2629,7 @@ function should_trigger_graceful_degradation(manager::PararealManager{T},
         monitor.iteration_count >= manager.config.max_iterations ÷ 2,
         
         # Numerical instability indicators
-        occursin("NaN", error_context) || occursin("Inf", error_context),
+        occursin("NaN", error_context) || occursin("Inf", error_context) || occursin("infinite", error_context),
         
         # Thread pool failures
         occursin("thread", error_context) || occursin("ThreadsX", error_context)
