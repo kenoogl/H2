@@ -1,0 +1,55 @@
+{
+  "hooks": [
+    {
+      "id": "auto-git-commit-task",
+      "name": "Auto Git Commit on Task Completion",
+      "description": "Automatically commits and pushes changes when a task is marked as completed",
+      "trigger": {
+        "type": "task_status_change",
+        "conditions": {
+          "new_status": "completed",
+          "spec_pattern": "parareal-time-parallelization"
+        }
+      },
+      "action": {
+        "type": "shell_script",
+        "script": ".kiro/hooks/auto-commit-task.sh",
+        "args": ["{{task_name}}", "{{task_number}}", "{{spec_name}}"],
+        "working_directory": ".",
+        "timeout": 60
+      },
+      "settings": {
+        "enabled": true,
+        "run_async": false,
+        "notify_on_success": true,
+        "notify_on_failure": true,
+        "log_output": true
+      }
+    },
+    {
+      "id": "manual-git-commit",
+      "name": "Manual Git Commit Helper",
+      "description": "Helper hook for manual git commits with standardized messages",
+      "trigger": {
+        "type": "manual"
+      },
+      "action": {
+        "type": "shell_script",
+        "script": ".kiro/hooks/auto-commit-task.sh",
+        "args": ["{{user_input:task_name}}", "{{user_input:task_number}}", "parareal-time-parallelization"],
+        "working_directory": "."
+      },
+      "settings": {
+        "enabled": true,
+        "show_in_command_palette": true,
+        "command_title": "Git: Commit Task Changes"
+      }
+    }
+  ],
+  "global_settings": {
+    "log_level": "info",
+    "log_file": ".kiro/hooks/hooks.log",
+    "max_concurrent_hooks": 3,
+    "default_timeout": 30
+  }
+}

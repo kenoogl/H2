@@ -1,0 +1,33 @@
+{
+  "name": "Auto Git Commit & Push on Task Completion",
+  "description": "Automatically commits and pushes changes to Git when a task is completed",
+  "trigger": {
+    "type": "task_completion",
+    "conditions": {
+      "task_status": "completed",
+      "spec_path": ".kiro/specs/parareal-time-parallelization/"
+    }
+  },
+  "actions": [
+    {
+      "type": "shell_command",
+      "command": "git add .",
+      "description": "Stage all changes"
+    },
+    {
+      "type": "shell_command", 
+      "command": "git commit -m \"Complete task: {{task_name}}\n\n{{task_description}}\n\nAuto-committed by Kiro hook\"",
+      "description": "Commit changes with task information"
+    },
+    {
+      "type": "shell_command",
+      "command": "git push origin $(git branch --show-current)",
+      "description": "Push to current branch"
+    }
+  ],
+  "settings": {
+    "enabled": true,
+    "run_on_error": false,
+    "timeout_seconds": 60
+  }
+}
