@@ -7,7 +7,10 @@ set -e  # Exit on any error
 
 # Function to log messages
 log_message() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+    local message="[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+    echo "$message"
+    # Also log to file if possible
+    echo "$message" >> .kiro/hooks/hooks.log 2>/dev/null || true
 }
 
 # Function to get current branch name
@@ -26,7 +29,13 @@ main() {
     local task_number="${2:-}"
     local spec_name="${3:-parareal-time-parallelization}"
     
-    log_message "Starting auto-commit for task: $task_name"
+    log_message "=== AUTO-COMMIT HOOK TRIGGERED ==="
+    log_message "Task name: $task_name"
+    log_message "Task number: $task_number"
+    log_message "Spec name: $spec_name"
+    log_message "Working directory: $(pwd)"
+    log_message "User: $(whoami)"
+    log_message "Arguments: $*"
     
     # Check if we're in a git repository
     if ! git rev-parse --git-dir > /dev/null 2>&1; then
