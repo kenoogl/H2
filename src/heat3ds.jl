@@ -281,7 +281,7 @@ function q3d(NX::Int, NY::Int, NZ::Int,
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__
-  q3d(240, 240, 30, "pbicgstab", "gs", epsilon=1.0e-4, par="sequential", is_steady=true)
+  q3d(240, 240, 30, "cg", "gs", epsilon=1.0e-4, par="sequential", is_steady=true)
   #q3d(240, 240, 31, "cg", "gs", epsilon=1.0e-4, par="sequential", is_steady=true)
   #q3d(40, 40, 31, "cg", "", epsilon=1.0e-4, par="sequential")
   #q3d(40, 40, 31, "pbicgstab", "gs", epsilon=1.0e-4, par="sequential")
