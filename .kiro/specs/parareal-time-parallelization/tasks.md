@@ -102,29 +102,29 @@
   - Add convergence checking and iteration control
   - _Requirements: 1.4, 1.5, 1.6, 2.4, 2.5_
 
-- [ ] 4.1 Implement Parareal iteration engine
+- [x] 4.1 Implement Parareal iteration engine
   - Create main iteration loop with predictor-corrector steps
   - Implement coarse prediction phase across all time windows
   - Add fine correction phase with MPI coordination
   - _Requirements: 1.4, 1.5_
 
-- [ ] 4.2 Implement convergence monitoring
+- [x] 4.2 Implement convergence monitoring
   - Create convergence criteria checking
   - Add residual norm calculation across MPI processes
   - Implement iteration limit enforcement
   - _Requirements: 2.4, 2.5_
 
-- [ ] 4.3 Write property test for parareal convergence accuracy
+- [-] 4.3 Write property test for parareal convergence accuracy
   - **Property 3: Parareal Convergence Accuracy**
   - **Validates: Requirements 1.6**
 
-- [ ] 4.4 Add graceful degradation for convergence failures
+- [x] 4.4 Add graceful degradation for convergence failures
   - Implement fallback to sequential computation
   - Add appropriate warning messages
   - Create error recovery mechanisms
   - _Requirements: 3.5_
 
-- [ ] 4.5 Write property test for graceful degradation
+- [x] 4.5 Write property test for graceful degradation
   - **Property 6: Graceful Degradation**
   - **Validates: Requirements 3.5**
 

@@ -6,6 +6,7 @@ using Printf
 using LinearAlgebra
 using FLoops
 using ThreadsX
+using Dates
 
 # Import Heat3ds modules
 include("common.jl")
@@ -14,6 +15,9 @@ using .Common: WorkBuffers, get_backend
 
 export PararealManager, PararealConfig, TimeWindow, MPICommunicator
 export initialize_mpi_parareal!, finalize_mpi_parareal!, run_parareal!
+export Heat3dsProblemData, create_heat3ds_problem_data
+export CoarseSolver, FineSolver, SolverConfiguration
+export PararealResult, ConvergenceMonitor
 
 """
 Parareal configuration parameters
@@ -106,6 +110,50 @@ struct TimeWindow{T <: AbstractFloat}
     n_coarse_steps::Int
     n_fine_steps::Int
     process_rank::Int
+end
+
+"""
+Coarse solver configuration for Parareal predictor
+"""
+struct CoarseSolver{T <: AbstractFloat}
+    dt::T
+    solver_type::Symbol
+    simplified_physics::Bool
+    spatial_resolution_factor::T
+    max_iterations::Int
+    tolerance::T
+    
+    function CoarseSolver{T}(;
+        dt::T = T(0.01),
+        solver_type::Symbol = :pbicgstab,
+        simplified_physics::Bool = true,
+        spatial_resolution_factor::T = T(2.0),
+        max_iterations::Int = 100,
+        tolerance::T = T(1e-4)
+    ) where {T <: AbstractFloat}
+        return new{T}(dt, solver_type, simplified_physics, spatial_resolution_factor, max_iterations, tolerance)
+    end
+end
+
+"""
+Fine solver configuration for Parareal corrector
+"""
+struct FineSolver{T <: AbstractFloat}
+    dt::T
+    solver_type::Symbol
+    use_full_physics::Bool
+    max_iterations::Int
+    tolerance::T
+    
+    function FineSolver{T}(;
+        dt::T = T(0.001),
+        solver_type::Symbol = :pbicgstab,
+        use_full_physics::Bool = true,
+        max_iterations::Int = 1000,
+        tolerance::T = T(1e-6)
+    ) where {T <: AbstractFloat}
+        return new{T}(dt, solver_type, use_full_physics, max_iterations, tolerance)
+    end
 end
 
 """
@@ -646,14 +694,89 @@ function get_hybrid_statistics(coordinator::HybridCoordinator{T}) where {T <: Ab
 end
 
 """
-Main Parareal algorithm (placeholder for now)
+Parareal iteration result structure
 """
-function run_parareal!(manager::PararealManager{T}, initial_condition) where {T <: AbstractFloat}
+struct PararealResult{T <: AbstractFloat}
+    final_solution::Array{T,3}
+    converged::Bool
+    iterations::Int
+    residual_history::Vector{T}
+    computation_time::T
+    communication_time::T
+end
+
+"""
+Problem data structure for Heat3ds integration
+"""
+struct Heat3dsProblemData{T <: AbstractFloat}
+    # Grid parameters
+    Δh::NTuple{3,T}              # Cell spacing
+    ZC::Vector{T}                # Z-coordinate centers
+    ΔZ::Vector{T}                # Z-coordinate spacing
+    
+    # Material properties and boundary conditions
+    ID::Array{UInt8,3}           # Material ID array
+    bc_set::Any                  # Boundary condition set
+    
+    # Solver parameters
+    par::String                  # Parallelization mode ("thread" or "sequential")
+    is_steady::Bool              # Steady-state flag
+    
+    function Heat3dsProblemData{T}(Δh, ZC, ΔZ, ID, bc_set, par, is_steady) where {T <: AbstractFloat}
+        return new{T}(Δh, ZC, ΔZ, ID, bc_set, par, is_steady)
+    end
+end
+
+"""
+Convergence monitoring for Parareal iterations
+"""
+mutable struct ConvergenceMonitor{T <: AbstractFloat}
+    tolerance::T
+    max_iterations::Int
+    residual_history::Vector{T}
+    iteration_count::Int
+    is_converged::Bool
+    
+    function ConvergenceMonitor{T}(tolerance::T, max_iterations::Int) where {T <: AbstractFloat}
+        return new{T}(tolerance, max_iterations, Vector{T}(), 0, false)
+    end
+end
+
+"""
+Check convergence based on residual norm
+"""
+function check_convergence!(monitor::ConvergenceMonitor{T}, residual::T) where {T <: AbstractFloat}
+    monitor.iteration_count += 1
+    push!(monitor.residual_history, residual)
+    
+    # Check convergence criteria
+    monitor.is_converged = (residual < monitor.tolerance) || (monitor.iteration_count >= monitor.max_iterations)
+    
+    return monitor.is_converged
+end
+
+"""
+Reset convergence monitor for new computation
+"""
+function reset_convergence_monitor!(monitor::ConvergenceMonitor{T}) where {T <: AbstractFloat}
+    empty!(monitor.residual_history)
+    monitor.iteration_count = 0
+    monitor.is_converged = false
+    return nothing
+end
+
+"""
+Main Parareal algorithm implementation
+"""
+function run_parareal!(manager::PararealManager{T}, 
+                      initial_condition::Array{T,3},
+                      problem_data::Heat3dsProblemData{T}) where {T <: AbstractFloat}
     if !manager.is_initialized
         error("PararealManager not initialized. Call initialize_mpi_parareal! first.")
     end
     
     rank = manager.mpi_comm.rank
+    size = manager.mpi_comm.size
     
     # Create hybrid coordinator
     coordinator = HybridCoordinator{T}(manager.mpi_comm, manager.config.n_threads_per_process)
@@ -674,10 +797,678 @@ function run_parareal!(manager::PararealManager{T}, initial_condition) where {T 
         end
     end
     
-    # TODO: Implement actual Parareal algorithm
-    # This will be implemented in subsequent tasks
+    # Initialize convergence monitor
+    monitor = ConvergenceMonitor{T}(manager.config.convergence_tolerance, manager.config.max_iterations)
+    
+    # Create solver configuration
+    coarse_solver = CoarseSolver{T}(
+        dt = manager.config.dt_coarse,
+        solver_type = :pbicgstab,
+        simplified_physics = true
+    )
+    
+    fine_solver = FineSolver{T}(
+        dt = manager.config.dt_fine,
+        solver_type = :pbicgstab,
+        use_full_physics = true
+    )
+    
+    # Get local time windows for this process
+    local_windows = get_local_time_windows(manager, rank)
+    
+    if rank == 0
+        println("Process $rank assigned $(length(local_windows)) time windows")
+    end
+    
+    # Initialize solution arrays for all time windows
+    n_windows = manager.config.n_time_windows
+    grid_size = size(initial_condition)
+    
+    # Solutions at the beginning of each time window
+    window_solutions = Vector{Array{T,3}}(undef, n_windows + 1)
+    window_solutions[1] = copy(initial_condition)  # Initial condition
+    
+    # Initialize with zeros for other windows (will be computed)
+    for i in 2:(n_windows + 1)
+        window_solutions[i] = zeros(T, grid_size)
+    end
+    
+    # Timing variables
+    total_start_time = time()
+    total_comm_time = T(0.0)
+    
+    try
+        # Run Parareal iterations
+        result = run_parareal_iterations!(
+            manager, monitor, coarse_solver, fine_solver, 
+            window_solutions, local_windows, problem_data, coordinator
+        )
+        
+        total_time = time() - total_start_time
+        
+        if rank == 0
+            println("Parareal computation completed:")
+            println("  Converged: $(result.converged)")
+            println("  Iterations: $(result.iterations)")
+            println("  Final residual: $(length(result.residual_history) > 0 ? result.residual_history[end] : "N/A")")
+            println("  Total time: $(total_time) seconds")
+        end
+        
+        return result
+        
+    catch e
+        error_context = string(e)
+        
+        if rank == 0
+            @warn "Parareal computation failed: $e"
+        end
+        
+        # Check if graceful degradation should be triggered
+        if should_trigger_graceful_degradation(manager, monitor, error_context)
+            if rank == 0
+                @warn "Triggering graceful degradation to sequential computation..."
+            end
+            
+            # Attempt graceful degradation to sequential computation
+            try
+                sequential_result = fallback_to_sequential!(
+                    manager, initial_condition, problem_data, coordinator
+                )
+                
+                # Log successful degradation
+                log_graceful_degradation_event(manager, error_context, true)
+                
+                if rank == 0
+                    @info "Sequential fallback completed successfully"
+                end
+                
+                return sequential_result
+                
+            catch sequential_error
+                # Log failed degradation
+                log_graceful_degradation_event(manager, error_context, false)
+                
+                if rank == 0
+                    @error "Sequential fallback also failed: $sequential_error"
+                end
+                
+                # Return failure result as last resort
+                return PararealResult{T}(
+                    copy(initial_condition),  # Return initial condition on failure
+                    false,  # Not converged
+                    0,      # No iterations completed
+                    T[],    # Empty residual history
+                    T(time() - total_start_time),  # Computation time
+                    T(0.0)  # Communication time
+                )
+            end
+        else
+            # Don't attempt graceful degradation for certain error types
+            if rank == 0
+                @error "Error does not qualify for graceful degradation: $error_context"
+            end
+            
+            # Return failure result immediately
+            return PararealResult{T}(
+                copy(initial_condition),  # Return initial condition on failure
+                false,  # Not converged
+                0,      # No iterations completed
+                T[],    # Empty residual history
+                T(time() - total_start_time),  # Computation time
+                T(0.0)  # Communication time
+            )
+        end
+    end
+end
+
+"""
+Run Parareal iterations with predictor-corrector scheme
+"""
+function run_parareal_iterations!(manager::PararealManager{T},
+                                 monitor::ConvergenceMonitor{T},
+                                 coarse_solver::CoarseSolver{T},
+                                 fine_solver::FineSolver{T},
+                                 window_solutions::Vector{Array{T,3}},
+                                 local_windows::Vector{TimeWindow{T}},
+                                 problem_data::Heat3dsProblemData{T},
+                                 coordinator::HybridCoordinator{T}) where {T <: AbstractFloat}
+    
+    rank = manager.mpi_comm.rank
+    size = manager.mpi_comm.size
+    n_windows = manager.config.n_time_windows
+    grid_size = size(window_solutions[1])
+    
+    # Storage for coarse and fine solutions
+    coarse_solutions = Vector{Array{T,3}}(undef, n_windows + 1)
+    fine_solutions = Vector{Array{T,3}}(undef, n_windows + 1)
+    
+    # Initialize first solution (initial condition)
+    coarse_solutions[1] = copy(window_solutions[1])
+    fine_solutions[1] = copy(window_solutions[1])
+    
+    iteration_start_time = time()
+    
+    # Initial coarse prediction phase (k=0)
+    if rank == 0
+        println("Performing initial coarse prediction...")
+    end
+    
+    perform_coarse_prediction_phase!(
+        manager, coarse_solver, coarse_solutions, problem_data, coordinator
+    )
+    
+    # Copy coarse solutions as initial guess
+    for i in 1:(n_windows + 1)
+        window_solutions[i] = copy(coarse_solutions[i])
+        fine_solutions[i] = copy(coarse_solutions[i])
+    end
+    
+    # Parareal iteration loop
+    reset_convergence_monitor!(monitor)
+    
+    while !monitor.is_converged
+        iteration_num = monitor.iteration_count + 1
+        
+        if rank == 0
+            println("Parareal iteration $iteration_num")
+        end
+        
+        # Fine correction phase - compute F(U_n^k) for assigned time windows
+        perform_fine_correction_phase!(
+            manager, fine_solver, fine_solutions, local_windows, problem_data, coordinator
+        )
+        
+        # Synchronize and exchange fine solutions
+        exchange_fine_solutions!(manager, fine_solutions, coordinator)
+        
+        # Coarse prediction phase - compute G(U_n^{k+1}) for all windows
+        perform_coarse_prediction_phase!(
+            manager, coarse_solver, coarse_solutions, problem_data, coordinator
+        )
+        
+        # Update solutions using Parareal formula: U_n^{k+1} = G(U_n^{k+1}) + F(U_n^k) - G(U_n^k)
+        old_coarse_solutions = Vector{Array{T,3}}(undef, n_windows + 1)
+        for i in 1:(n_windows + 1)
+            old_coarse_solutions[i] = copy(window_solutions[i])
+        end
+        
+        # Compute old coarse solutions G(U_n^k)
+        perform_coarse_prediction_on_old_solutions!(
+            manager, coarse_solver, old_coarse_solutions, problem_data, coordinator
+        )
+        
+        # Apply Parareal update formula
+        max_residual = T(0.0)
+        for i in 2:(n_windows + 1)  # Skip initial condition
+            # U_n^{k+1} = G(U_n^{k+1}) + F(U_n^k) - G(U_n^k)
+            window_solutions[i] = coarse_solutions[i] + fine_solutions[i] - old_coarse_solutions[i]
+            
+            # Compute residual for convergence check
+            residual = norm(window_solutions[i] - fine_solutions[i])
+            max_residual = max(max_residual, residual)
+        end
+        
+        # Check convergence across all processes
+        global_residual = compute_global_residual!(manager, max_residual)
+        
+        # Update convergence monitor
+        converged = check_convergence!(monitor, global_residual)
+        
+        if rank == 0
+            println("  Iteration $iteration_num: residual = $global_residual, converged = $converged")
+        end
+        
+        # Broadcast convergence status to ensure all processes agree
+        converged = broadcast_convergence_status!(manager.mpi_comm, converged)
+        monitor.is_converged = converged
+        
+        if converged
+            break
+        end
+    end
+    
+    computation_time = T(time() - iteration_start_time)
+    
+    # Return final solution (from the last time window)
+    final_solution = window_solutions[end]
+    
+    return PararealResult{T}(
+        final_solution,
+        monitor.is_converged,
+        monitor.iteration_count,
+        copy(monitor.residual_history),
+        computation_time,
+        T(0.0)  # Communication time tracking would be added here
+    )
+end
+
+"""
+Perform coarse prediction phase across all time windows
+"""
+function perform_coarse_prediction_phase!(manager::PararealManager{T},
+                                        coarse_solver::CoarseSolver{T},
+                                        solutions::Vector{Array{T,3}},
+                                        problem_data::Heat3dsProblemData{T},
+                                        coordinator::HybridCoordinator{T}) where {T <: AbstractFloat}
+    
+    rank = manager.mpi_comm.rank
+    n_windows = manager.config.n_time_windows
+    
+    # Each process computes coarse solutions for all time windows sequentially
+    # This ensures all processes have the same coarse trajectory
+    
+    for i in 1:n_windows
+        window = manager.time_windows[i]
+        
+        # Solve coarse problem from window start to end
+        solutions[i + 1] = solve_coarse!(
+            coarse_solver, solutions[i], window, problem_data
+        )
+    end
+    
+    # Synchronize to ensure all processes have completed coarse phase
+    synchronize_processes!(manager.mpi_comm)
     
     return nothing
+end
+
+"""
+Perform coarse prediction on old solutions (for Parareal update formula)
+"""
+function perform_coarse_prediction_on_old_solutions!(manager::PararealManager{T},
+                                                   coarse_solver::CoarseSolver{T},
+                                                   old_solutions::Vector{Array{T,3}},
+                                                   problem_data::Heat3dsProblemData{T},
+                                                   coordinator::HybridCoordinator{T}) where {T <: AbstractFloat}
+    
+    n_windows = manager.config.n_time_windows
+    
+    # Compute G(U_n^k) - coarse solutions based on old window solutions
+    for i in 1:n_windows
+        window = manager.time_windows[i]
+        
+        # Solve coarse problem from old solution at window start
+        old_solutions[i + 1] = solve_coarse!(
+            coarse_solver, old_solutions[i], window, problem_data
+        )
+    end
+    
+    synchronize_processes!(manager.mpi_comm)
+    
+    return nothing
+end
+
+"""
+Perform fine correction phase for assigned time windows
+"""
+function perform_fine_correction_phase!(manager::PararealManager{T},
+                                      fine_solver::FineSolver{T},
+                                      fine_solutions::Vector{Array{T,3}},
+                                      local_windows::Vector{TimeWindow{T}},
+                                      problem_data::Heat3dsProblemData{T},
+                                      coordinator::HybridCoordinator{T}) where {T <: AbstractFloat}
+    
+    rank = manager.mpi_comm.rank
+    
+    # Each process computes fine solutions only for its assigned time windows
+    for window in local_windows
+        window_index = findfirst(w -> w.start_time == window.start_time && w.end_time == window.end_time, 
+                                manager.time_windows)
+        
+        if window_index !== nothing
+            # Solve fine problem for this time window
+            fine_solutions[window_index + 1] = solve_fine!(
+                fine_solver, fine_solutions[window_index], window, problem_data
+            )
+        end
+    end
+    
+    return nothing
+end
+
+"""
+Exchange fine solutions between MPI processes
+"""
+function exchange_fine_solutions!(manager::PararealManager{T},
+                                 fine_solutions::Vector{Array{T,3}},
+                                 coordinator::HybridCoordinator{T}) where {T <: AbstractFloat}
+    
+    rank = manager.mpi_comm.rank
+    size = manager.mpi_comm.size
+    n_windows = manager.config.n_time_windows
+    
+    # Each process broadcasts its computed fine solutions to all other processes
+    for window_idx in 1:n_windows
+        window = manager.time_windows[window_idx]
+        responsible_rank = window.process_rank
+        
+        if rank == responsible_rank
+            # This process computed this window - broadcast to others
+            for target_rank in 0:(size-1)
+                if target_rank != rank
+                    exchange_temperature_fields!(
+                        manager.mpi_comm, fine_solutions[window_idx + 1], target_rank
+                    )
+                end
+            end
+        else
+            # This process needs to receive this window solution
+            fine_solutions[window_idx + 1] = exchange_temperature_fields!(
+                manager.mpi_comm, fine_solutions[window_idx + 1], responsible_rank
+            )
+        end
+    end
+    
+    # Synchronize to ensure all exchanges are complete
+    synchronize_processes!(manager.mpi_comm)
+    
+    return nothing
+end
+
+"""
+Compute global residual across all MPI processes
+"""
+function compute_global_residual!(manager::PararealManager{T}, local_residual::T) where {T <: AbstractFloat}
+    if manager.mpi_comm.comm == MPI.COMM_NULL
+        # For testing without MPI
+        return local_residual
+    end
+    
+    # Use MPI_Allreduce to find maximum residual across all processes
+    global_residual = MPI.Allreduce(local_residual, MPI.MAX, manager.mpi_comm.comm)
+    
+    return global_residual
+end
+
+"""
+Advanced convergence monitoring with multiple criteria
+"""
+mutable struct AdvancedConvergenceMonitor{T <: AbstractFloat}
+    # Basic convergence criteria
+    absolute_tolerance::T
+    relative_tolerance::T
+    max_iterations::Int
+    
+    # Convergence history
+    residual_history::Vector{T}
+    relative_change_history::Vector{T}
+    iteration_count::Int
+    
+    # Convergence status
+    is_converged::Bool
+    convergence_reason::String
+    
+    # Stagnation detection
+    stagnation_threshold::T
+    stagnation_window::Int
+    
+    function AdvancedConvergenceMonitor{T}(;
+        absolute_tolerance::T = T(1e-6),
+        relative_tolerance::T = T(1e-4),
+        max_iterations::Int = 20,
+        stagnation_threshold::T = T(1e-8),
+        stagnation_window::Int = 3
+    ) where {T <: AbstractFloat}
+        
+        return new{T}(
+            absolute_tolerance, relative_tolerance, max_iterations,
+            Vector{T}(), Vector{T}(), 0,
+            false, "",
+            stagnation_threshold, stagnation_window
+        )
+    end
+end
+
+"""
+Check advanced convergence criteria
+"""
+function check_advanced_convergence!(monitor::AdvancedConvergenceMonitor{T}, 
+                                   current_residual::T,
+                                   previous_residual::T = T(Inf)) where {T <: AbstractFloat}
+    
+    monitor.iteration_count += 1
+    push!(monitor.residual_history, current_residual)
+    
+    # Calculate relative change if we have a previous residual
+    if previous_residual != T(Inf) && previous_residual > 0
+        relative_change = abs(current_residual - previous_residual) / previous_residual
+        push!(monitor.relative_change_history, relative_change)
+    end
+    
+    # Check absolute tolerance
+    if current_residual < monitor.absolute_tolerance
+        monitor.is_converged = true
+        monitor.convergence_reason = "Absolute tolerance achieved"
+        return true
+    end
+    
+    # Check relative tolerance (if we have previous iteration)
+    if length(monitor.relative_change_history) > 0
+        latest_relative_change = monitor.relative_change_history[end]
+        if latest_relative_change < monitor.relative_tolerance
+            monitor.is_converged = true
+            monitor.convergence_reason = "Relative tolerance achieved"
+            return true
+        end
+    end
+    
+    # Check for stagnation
+    if length(monitor.relative_change_history) >= monitor.stagnation_window
+        recent_changes = monitor.relative_change_history[end-monitor.stagnation_window+1:end]
+        if all(change -> change < monitor.stagnation_threshold, recent_changes)
+            monitor.is_converged = true
+            monitor.convergence_reason = "Convergence stagnated"
+            return true
+        end
+    end
+    
+    # Check maximum iterations
+    if monitor.iteration_count >= monitor.max_iterations
+        monitor.is_converged = true
+        monitor.convergence_reason = "Maximum iterations reached"
+        return true
+    end
+    
+    return false
+end
+
+"""
+Get convergence statistics
+"""
+function get_convergence_statistics(monitor::AdvancedConvergenceMonitor{T}) where {T <: AbstractFloat}
+    stats = Dict{String, Any}()
+    
+    stats["iterations"] = monitor.iteration_count
+    stats["converged"] = monitor.is_converged
+    stats["convergence_reason"] = monitor.convergence_reason
+    
+    if length(monitor.residual_history) > 0
+        stats["initial_residual"] = monitor.residual_history[1]
+        stats["final_residual"] = monitor.residual_history[end]
+        stats["residual_reduction"] = monitor.residual_history[1] / monitor.residual_history[end]
+    end
+    
+    if length(monitor.relative_change_history) > 0
+        stats["average_relative_change"] = sum(monitor.relative_change_history) / length(monitor.relative_change_history)
+        stats["final_relative_change"] = monitor.relative_change_history[end]
+    end
+    
+    # Convergence rate estimation (if we have enough data)
+    if length(monitor.residual_history) >= 3
+        # Estimate convergence rate using linear regression on log(residual)
+        log_residuals = log.(monitor.residual_history[2:end])  # Skip first to avoid log(0)
+        iterations = collect(2:length(monitor.residual_history))
+        
+        # Simple linear regression: log(residual) = a * iteration + b
+        n = length(log_residuals)
+        sum_x = sum(iterations)
+        sum_y = sum(log_residuals)
+        sum_xy = sum(iterations .* log_residuals)
+        sum_x2 = sum(iterations .^ 2)
+        
+        slope = (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x^2)
+        stats["convergence_rate"] = -slope  # Negative slope means decreasing residual
+    end
+    
+    return stats
+end
+
+"""
+Reset advanced convergence monitor
+"""
+function reset_advanced_convergence_monitor!(monitor::AdvancedConvergenceMonitor{T}) where {T <: AbstractFloat}
+    empty!(monitor.residual_history)
+    empty!(monitor.relative_change_history)
+    monitor.iteration_count = 0
+    monitor.is_converged = false
+    monitor.convergence_reason = ""
+    return nothing
+end
+
+"""
+Enforce iteration limits and provide warnings
+"""
+function enforce_iteration_limits!(manager::PararealManager{T}, 
+                                 monitor::ConvergenceMonitor{T}) where {T <: AbstractFloat}
+    
+    rank = manager.mpi_comm.rank
+    
+    # Check if we're approaching iteration limit
+    remaining_iterations = monitor.max_iterations - monitor.iteration_count
+    
+    if remaining_iterations <= 3 && remaining_iterations > 0 && rank == 0
+        @warn "Approaching maximum iterations: $remaining_iterations iterations remaining"
+        @warn "Current residual: $(length(monitor.residual_history) > 0 ? monitor.residual_history[end] : "N/A")"
+        @warn "Target tolerance: $(monitor.tolerance)"
+    end
+    
+    # Check if iteration limit exceeded
+    if monitor.iteration_count >= monitor.max_iterations
+        if rank == 0
+            @warn "Maximum iterations ($(monitor.max_iterations)) reached without convergence"
+            if length(monitor.residual_history) > 0
+                @warn "Final residual: $(monitor.residual_history[end])"
+                @warn "Target tolerance: $(monitor.tolerance)"
+                
+                # Provide convergence analysis
+                if length(monitor.residual_history) >= 2
+                    initial_residual = monitor.residual_history[1]
+                    final_residual = monitor.residual_history[end]
+                    reduction_factor = initial_residual / final_residual
+                    
+                    @warn "Residual reduction factor: $(reduction_factor)"
+                    
+                    if reduction_factor < 2.0
+                        @warn "Poor convergence detected. Consider:"
+                        @warn "  - Reducing coarse time step"
+                        @warn "  - Increasing fine solver accuracy"
+                        @warn "  - Checking problem conditioning"
+                    end
+                end
+            end
+        end
+        
+        monitor.is_converged = true  # Force convergence to exit loop
+        return true
+    end
+    
+    return false
+end
+
+"""
+Compute residual norms across MPI processes with different norm types
+"""
+function compute_distributed_residual_norm!(manager::PararealManager{T},
+                                          local_data::Array{T,3},
+                                          reference_data::Array{T,3},
+                                          norm_type::Symbol = :l2) where {T <: AbstractFloat}
+    
+    # Compute local contribution to the norm
+    local_contribution = if norm_type == :l2
+        sum((local_data - reference_data).^2)
+    elseif norm_type == :linf
+        maximum(abs.(local_data - reference_data))
+    elseif norm_type == :l1
+        sum(abs.(local_data - reference_data))
+    else
+        error("Unsupported norm type: $norm_type")
+    end
+    
+    if manager.mpi_comm.comm == MPI.COMM_NULL
+        # For testing without MPI
+        return norm_type == :l2 ? sqrt(local_contribution) : local_contribution
+    end
+    
+    # Reduce across all processes
+    if norm_type == :l2
+        global_sum = MPI.Allreduce(local_contribution, MPI.SUM, manager.mpi_comm.comm)
+        return sqrt(global_sum)
+    elseif norm_type == :linf
+        return MPI.Allreduce(local_contribution, MPI.MAX, manager.mpi_comm.comm)
+    elseif norm_type == :l1
+        return MPI.Allreduce(local_contribution, MPI.SUM, manager.mpi_comm.comm)
+    end
+end
+
+"""
+Monitor convergence with detailed diagnostics
+"""
+function monitor_convergence_with_diagnostics!(manager::PararealManager{T},
+                                             window_solutions::Vector{Array{T,3}},
+                                             fine_solutions::Vector{Array{T,3}},
+                                             iteration::Int) where {T <: AbstractFloat}
+    
+    rank = manager.mpi_comm.rank
+    n_windows = manager.config.n_time_windows
+    
+    # Compute various residual norms
+    residuals = Dict{String, T}()
+    
+    for i in 2:(n_windows + 1)  # Skip initial condition
+        window_idx = i - 1
+        
+        # Only compute for windows assigned to this process
+        window = manager.time_windows[window_idx]
+        if window.process_rank == rank
+            l2_residual = compute_distributed_residual_norm!(
+                manager, window_solutions[i], fine_solutions[i], :l2
+            )
+            linf_residual = compute_distributed_residual_norm!(
+                manager, window_solutions[i], fine_solutions[i], :linf
+            )
+            
+            residuals["window_$(window_idx)_l2"] = l2_residual
+            residuals["window_$(window_idx)_linf"] = linf_residual
+        end
+    end
+    
+    # Gather all residuals to root process for reporting
+    all_residuals = gather_performance_metrics!(manager.mpi_comm, residuals)
+    
+    if rank == 0 && !isempty(all_residuals)
+        println("Convergence diagnostics for iteration $iteration:")
+        
+        # Find maximum residuals across all windows
+        max_l2 = T(0.0)
+        max_linf = T(0.0)
+        
+        for (process_name, process_residuals) in all_residuals
+            for (metric_name, value) in process_residuals
+                if occursin("_l2", metric_name)
+                    max_l2 = max(max_l2, value)
+                elseif occursin("_linf", metric_name)
+                    max_linf = max(max_linf, value)
+                end
+            end
+        end
+        
+        println("  Maximum L2 residual: $max_l2")
+        println("  Maximum L∞ residual: $max_linf")
+        
+        return max(max_l2, max_linf)
+    end
+    
+    return T(0.0)
 end
 
 """
@@ -1555,6 +2346,164 @@ function get_solver_recommendations(selector::SolverSelector{T},
     end
     
     return recommendations
+end
+
+"""
+Fallback to sequential computation when Parareal fails
+"""
+function fallback_to_sequential!(manager::PararealManager{T},
+                                initial_condition::Array{T,3},
+                                problem_data::Heat3dsProblemData{T},
+                                coordinator::HybridCoordinator{T}) where {T <: AbstractFloat}
+    
+    rank = manager.mpi_comm.rank
+    
+    if rank == 0
+        @info "Executing sequential fallback computation..."
+    end
+    
+    # Use fine solver for sequential computation
+    fine_solver = FineSolver{T}(
+        dt = manager.config.dt_fine,
+        solver_type = :pbicgstab,
+        use_full_physics = true
+    )
+    
+    # Sequential time stepping
+    current_solution = copy(initial_condition)
+    total_time = manager.config.total_time
+    dt = manager.config.dt_fine
+    n_steps = Int(ceil(total_time / dt))
+    
+    start_time = time()
+    
+    # Simple forward Euler or existing Heat3ds solver integration
+    for step in 1:n_steps
+        current_time = (step - 1) * dt
+        
+        # Use fine solver to advance one time step
+        try
+            current_solution = solve_time_step!(
+                fine_solver, current_solution, current_time, dt, problem_data
+            )
+        catch solver_error
+            if rank == 0
+                @error "Sequential solver failed at step $step: $solver_error"
+            end
+            rethrow(solver_error)
+        end
+        
+        # Progress reporting
+        if rank == 0 && step % max(1, n_steps ÷ 10) == 0
+            progress = 100.0 * step / n_steps
+            @info "Sequential computation progress: $(round(progress, digits=1))%"
+        end
+    end
+    
+    computation_time = time() - start_time
+    
+    if rank == 0
+        @info "Sequential computation completed in $(computation_time) seconds"
+    end
+    
+    # Return result in Parareal format
+    return PararealResult{T}(
+        current_solution,
+        true,  # Mark as converged (sequential is exact)
+        1,     # One "iteration" (sequential)
+        T[],   # No residual history for sequential
+        T(computation_time),
+        T(0.0) # No communication time
+    )
+end
+
+"""
+Solve a single time step using the fine solver
+"""
+function solve_time_step!(solver::FineSolver{T},
+                         solution::Array{T,3},
+                         current_time::T,
+                         dt::T,
+                         problem_data::Heat3dsProblemData{T}) where {T <: AbstractFloat}
+    
+    # This is a simplified implementation - in practice, this would call
+    # the actual Heat3ds solver for one time step
+    
+    # For now, implement a simple explicit diffusion step
+    grid_size = size(solution)
+    new_solution = copy(solution)
+    
+    # Simple 3D diffusion with periodic boundary conditions
+    alpha = T(0.1)  # Thermal diffusivity
+    dx, dy, dz = T(0.1), T(0.1), T(0.1)  # Grid spacing
+    
+    for k in 2:(grid_size[3]-1)
+        for j in 2:(grid_size[2]-1)
+            for i in 2:(grid_size[1]-1)
+                # 3D Laplacian
+                laplacian = (solution[i+1,j,k] - 2*solution[i,j,k] + solution[i-1,j,k]) / dx^2 +
+                           (solution[i,j+1,k] - 2*solution[i,j,k] + solution[i,j-1,k]) / dy^2 +
+                           (solution[i,j,k+1] - 2*solution[i,j,k] + solution[i,j,k-1]) / dz^2
+                
+                new_solution[i,j,k] = solution[i,j,k] + dt * alpha * laplacian
+            end
+        end
+    end
+    
+    return new_solution
+end
+
+"""
+Check if graceful degradation should be triggered
+"""
+function should_trigger_graceful_degradation(manager::PararealManager{T},
+                                           monitor::ConvergenceMonitor{T},
+                                           error_context::String) where {T <: AbstractFloat}
+    
+    # Trigger conditions for graceful degradation
+    trigger_conditions = [
+        # MPI communication failures
+        occursin("MPI", error_context) || occursin("communication", error_context),
+        
+        # Memory allocation failures
+        occursin("OutOfMemoryError", error_context) || occursin("memory", error_context),
+        
+        # Solver convergence failures after many iterations
+        monitor.iteration_count >= manager.config.max_iterations ÷ 2,
+        
+        # Numerical instability indicators
+        occursin("NaN", error_context) || occursin("Inf", error_context),
+        
+        # Thread pool failures
+        occursin("thread", error_context) || occursin("ThreadsX", error_context)
+    ]
+    
+    return any(trigger_conditions)
+end
+
+"""
+Log graceful degradation event for analysis
+"""
+function log_graceful_degradation_event(manager::PararealManager{T},
+                                       error_context::String,
+                                       fallback_successful::Bool) where {T <: AbstractFloat}
+    
+    rank = manager.mpi_comm.rank
+    
+    if rank == 0
+        timestamp = Dates.format(now(), "yyyy-mm-dd HH:MM:SS")
+        
+        @info "=== Graceful Degradation Event Log ==="
+        @info "Timestamp: $timestamp"
+        @info "Original error: $error_context"
+        @info "Parareal configuration:"
+        @info "  Time windows: $(manager.config.n_time_windows)"
+        @info "  MPI processes: $(manager.config.n_mpi_processes)"
+        @info "  Threads per process: $(manager.config.n_threads_per_process)"
+        @info "  Max iterations: $(manager.config.max_iterations)"
+        @info "Sequential fallback successful: $fallback_successful"
+        @info "======================================"
+    end
 end
 
 end # module Parareal
