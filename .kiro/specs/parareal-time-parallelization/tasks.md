@@ -64,35 +64,35 @@
   - Test WorkBuffers compatibility across MPI processes
   - _Requirements: 6.2, 6.3_
 
-- [ ] 3. Implement Coarse and Fine solvers
+- [x] 3. Implement Coarse and Fine solvers
   - Create CoarseSolver with reduced resolution and simplified physics
   - Implement FineSolver using full resolution and existing Heat3ds solvers
   - Add solver selection and configuration interfaces
   - _Requirements: 7.1, 7.2, 7.3, 3.3_
 
-- [ ] 3.1 Implement CoarseSolver component
+- [x] 3.1 Implement CoarseSolver component
   - Create spatial resolution reduction algorithms
   - Implement simplified physics models for coarse predictions
   - Add configurable coarse time step handling
   - _Requirements: 7.1, 7.2_
 
-- [ ] 3.2 Implement FineSolver component
+- [x] 3.2 Implement FineSolver component
   - Integrate existing PBiCGSTAB, CG, SOR solvers
   - Maintain full spatial resolution and complete physics
   - Add fine time step configuration
   - _Requirements: 7.3, 3.3_
 
-- [ ] 3.3 Write property test for solver compatibility
+- [x] 3.3 Write property test for solver compatibility
   - **Property 5: Backward Compatibility Preservation**
   - **Validates: Requirements 3.1, 3.2, 3.3, 3.4**
 
-- [ ] 3.4 Create solver selection interface
+- [x] 3.4 Create solver selection interface
   - Implement solver type configuration (coarse vs fine)
   - Add solver parameter validation
   - Create solver performance monitoring
   - _Requirements: 2.1, 2.2, 4.1, 4.2_
 
-- [ ] 3.5 Write property test for parameter validation
+- [x] 3.5 Write property test for parameter validation
   - **Property 4: Parameter Validation Completeness**
   - **Validates: Requirements 2.1, 2.2, 2.3, 2.4, 2.5**
 

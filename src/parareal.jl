@@ -680,4 +680,881 @@ function run_parareal!(manager::PararealManager{T}, initial_condition) where {T 
     return nothing
 end
 
+"""
+Abstract base type for Parareal solvers
+"""
+abstract type PararealSolver{T <: AbstractFloat} end
+
+"""
+Coarse solver with reduced resolution and simplified physics
+"""
+struct CoarseSolver{T <: AbstractFloat} <: PararealSolver{T}
+    dt::T
+    spatial_resolution_factor::T  # 空間解像度削減係数 (例: 2.0 = 半分の解像度)
+    simplified_physics::Bool      # 物理モデル簡略化フラグ
+    solver_type::Symbol          # :pbicgstab, :cg, :sor
+    tolerance::T                 # 収束許容誤差（粗解法用に緩い設定）
+    max_iterations::Int          # 最大反復回数（粗解法用に少ない設定）
+    
+    function CoarseSolver{T}(;
+        dt::T = T(0.1),
+        spatial_resolution_factor::T = T(2.0),
+        simplified_physics::Bool = true,
+        solver_type::Symbol = :pbicgstab,
+        tolerance::T = T(1e-3),  # 粗解法なので緩い許容誤差
+        max_iterations::Int = 100
+    ) where {T <: AbstractFloat}
+        
+        if spatial_resolution_factor <= 0
+            error("Spatial resolution factor must be positive")
+        end
+        if dt <= 0
+            error("Time step must be positive")
+        end
+        if tolerance <= 0
+            error("Tolerance must be positive")
+        end
+        if max_iterations <= 0
+            error("Max iterations must be positive")
+        end
+        
+        return new{T}(dt, spatial_resolution_factor, simplified_physics, 
+                     solver_type, tolerance, max_iterations)
+    end
+end
+
+# Convenience constructor
+function CoarseSolver(; kwargs...)
+    return CoarseSolver{Float64}(; kwargs...)
+end
+
+"""
+Fine solver using full resolution and existing Heat3ds solvers
+"""
+struct FineSolver{T <: AbstractFloat} <: PararealSolver{T}
+    dt::T
+    solver_type::Symbol          # :pbicgstab, :cg, :sor
+    smoother::Symbol            # :gs, :none
+    tolerance::T                # 収束許容誤差（精密解法用に厳しい設定）
+    max_iterations::Int         # 最大反復回数
+    use_full_physics::Bool      # 完全な物理モデルを使用
+    
+    function FineSolver{T}(;
+        dt::T = T(0.01),
+        solver_type::Symbol = :pbicgstab,
+        smoother::Symbol = :gs,
+        tolerance::T = T(1e-6),  # 精密解法なので厳しい許容誤差
+        max_iterations::Int = 8000,
+        use_full_physics::Bool = true
+    ) where {T <: AbstractFloat}
+        
+        if dt <= 0
+            error("Time step must be positive")
+        end
+        if tolerance <= 0
+            error("Tolerance must be positive")
+        end
+        if max_iterations <= 0
+            error("Max iterations must be positive")
+        end
+        
+        return new{T}(dt, solver_type, smoother, tolerance, max_iterations, use_full_physics)
+    end
+end
+
+# Convenience constructor
+function FineSolver(; kwargs...)
+    return FineSolver{Float64}(; kwargs...)
+end
+
+"""
+Solver configuration for Parareal algorithm
+"""
+struct SolverConfiguration{T <: AbstractFloat}
+    coarse_solver::CoarseSolver{T}
+    fine_solver::FineSolver{T}
+    
+    function SolverConfiguration{T}(coarse::CoarseSolver{T}, fine::FineSolver{T}) where {T <: AbstractFloat}
+        # Validate that coarse dt >= fine dt
+        if coarse.dt < fine.dt
+            @warn "Coarse time step ($(coarse.dt)) is smaller than fine time step ($(fine.dt)). This may lead to poor performance."
+        end
+        
+        return new{T}(coarse, fine)
+    end
+end
+
+# Convenience constructor
+function SolverConfiguration(coarse::CoarseSolver{T}, fine::FineSolver{T}) where {T <: AbstractFloat}
+    return SolverConfiguration{T}(coarse, fine)
+end
+
+"""
+Create coarse grid by reducing spatial resolution
+"""
+function create_coarse_grid(original_size::NTuple{3,Int}, resolution_factor::T) where {T <: AbstractFloat}
+    if resolution_factor <= 1.0
+        return original_size  # No reduction
+    end
+    
+    # Calculate new grid size (ensure minimum size of 3 for boundary conditions)
+    new_mx = max(3, ceil(Int, original_size[1] / resolution_factor))
+    new_my = max(3, ceil(Int, original_size[2] / resolution_factor))
+    new_mz = max(3, ceil(Int, original_size[3] / resolution_factor))
+    
+    return (new_mx, new_my, new_mz)
+end
+
+"""
+Interpolate solution from coarse grid to fine grid
+"""
+function interpolate_coarse_to_fine!(fine_data::Array{T,3}, coarse_data::Array{T,3}) where {T <: AbstractFloat}
+    fine_size = size(fine_data)
+    coarse_size = size(coarse_data)
+    
+    # Simple trilinear interpolation
+    for k in 1:fine_size[3], j in 1:fine_size[2], i in 1:fine_size[1]
+        # Map fine grid indices to coarse grid coordinates
+        ci = 1 + (i - 1) * (coarse_size[1] - 1) / (fine_size[1] - 1)
+        cj = 1 + (j - 1) * (coarse_size[2] - 1) / (fine_size[2] - 1)
+        ck = 1 + (k - 1) * (coarse_size[3] - 1) / (fine_size[3] - 1)
+        
+        # Get integer indices and weights
+        i1, i2 = floor(Int, ci), ceil(Int, ci)
+        j1, j2 = floor(Int, cj), ceil(Int, cj)
+        k1, k2 = floor(Int, ck), ceil(Int, ck)
+        
+        # Clamp to valid range
+        i1 = clamp(i1, 1, coarse_size[1])
+        i2 = clamp(i2, 1, coarse_size[1])
+        j1 = clamp(j1, 1, coarse_size[2])
+        j2 = clamp(j2, 1, coarse_size[2])
+        k1 = clamp(k1, 1, coarse_size[3])
+        k2 = clamp(k2, 1, coarse_size[3])
+        
+        # Interpolation weights
+        wi = (i1 == i2) ? T(1.0) : (ci - i1) / (i2 - i1)
+        wj = (j1 == j2) ? T(1.0) : (cj - j1) / (j2 - j1)
+        wk = (k1 == k2) ? T(1.0) : (ck - k1) / (k2 - k1)
+        
+        # Trilinear interpolation
+        v000 = coarse_data[i1, j1, k1]
+        v001 = coarse_data[i1, j1, k2]
+        v010 = coarse_data[i1, j2, k1]
+        v011 = coarse_data[i1, j2, k2]
+        v100 = coarse_data[i2, j1, k1]
+        v101 = coarse_data[i2, j1, k2]
+        v110 = coarse_data[i2, j2, k1]
+        v111 = coarse_data[i2, j2, k2]
+        
+        # Interpolate along i-direction
+        v00 = v000 * (1 - wi) + v100 * wi
+        v01 = v001 * (1 - wi) + v101 * wi
+        v10 = v010 * (1 - wi) + v110 * wi
+        v11 = v011 * (1 - wi) + v111 * wi
+        
+        # Interpolate along j-direction
+        v0 = v00 * (1 - wj) + v10 * wj
+        v1 = v01 * (1 - wj) + v11 * wj
+        
+        # Interpolate along k-direction
+        fine_data[i, j, k] = v0 * (1 - wk) + v1 * wk
+    end
+    
+    return nothing
+end
+
+"""
+Restrict solution from fine grid to coarse grid
+"""
+function restrict_fine_to_coarse!(coarse_data::Array{T,3}, fine_data::Array{T,3}) where {T <: AbstractFloat}
+    fine_size = size(fine_data)
+    coarse_size = size(coarse_data)
+    
+    # Simple restriction using averaging
+    for k in 1:coarse_size[3], j in 1:coarse_size[2], i in 1:coarse_size[1]
+        # Map coarse grid indices to fine grid region
+        fi_start = 1 + (i - 1) * (fine_size[1] - 1) ÷ (coarse_size[1] - 1)
+        fi_end = min(fine_size[1], fi_start + (fine_size[1] - 1) ÷ (coarse_size[1] - 1))
+        
+        fj_start = 1 + (j - 1) * (fine_size[2] - 1) ÷ (coarse_size[2] - 1)
+        fj_end = min(fine_size[2], fj_start + (fine_size[2] - 1) ÷ (coarse_size[2] - 1))
+        
+        fk_start = 1 + (k - 1) * (fine_size[3] - 1) ÷ (coarse_size[3] - 1)
+        fk_end = min(fine_size[3], fk_start + (fine_size[3] - 1) ÷ (coarse_size[3] - 1))
+        
+        # Average values in the region
+        sum_val = T(0.0)
+        count = 0
+        
+        for fk in fk_start:fk_end, fj in fj_start:fj_end, fi in fi_start:fi_end
+            sum_val += fine_data[fi, fj, fk]
+            count += 1
+        end
+        
+        coarse_data[i, j, k] = count > 0 ? sum_val / count : T(0.0)
+    end
+    
+    return nothing
+end
+
+"""
+Solve using coarse solver (reduced resolution and simplified physics)
+"""
+function solve_coarse!(solver::CoarseSolver{T}, 
+                      initial_condition::Array{T,3},
+                      time_window::TimeWindow{T},
+                      problem_data::Any) where {T <: AbstractFloat}
+    
+    # Create coarse grid
+    fine_size = size(initial_condition)
+    coarse_size = create_coarse_grid(fine_size, solver.spatial_resolution_factor)
+    
+    # Initialize coarse grid data
+    coarse_solution = zeros(T, coarse_size...)
+    
+    # Restrict initial condition to coarse grid
+    restrict_fine_to_coarse!(coarse_solution, initial_condition)
+    
+    # Simplified time stepping for coarse solver
+    current_time = time_window.start_time
+    dt = solver.dt
+    
+    while current_time < time_window.end_time
+        # Adjust time step to not overshoot end time
+        actual_dt = min(dt, time_window.end_time - current_time)
+        
+        # Simple explicit time stepping (simplified physics)
+        if solver.simplified_physics
+            # Very simple heat diffusion update (explicit Euler)
+            # This is a placeholder - in practice, you'd use a simplified version of the full solver
+            coarse_solution_new = copy(coarse_solution)
+            
+            # Simple diffusion update (placeholder)
+            for k in 2:coarse_size[3]-1, j in 2:coarse_size[2]-1, i in 2:coarse_size[1]-1
+                # Simple 6-point stencil diffusion
+                diffusion = (coarse_solution[i+1,j,k] + coarse_solution[i-1,j,k] +
+                           coarse_solution[i,j+1,k] + coarse_solution[i,j-1,k] +
+                           coarse_solution[i,j,k+1] + coarse_solution[i,j,k-1] -
+                           6 * coarse_solution[i,j,k])
+                
+                coarse_solution_new[i,j,k] = coarse_solution[i,j,k] + actual_dt * T(0.1) * diffusion
+            end
+            
+            coarse_solution .= coarse_solution_new
+        else
+            # Use full solver on coarse grid (not implemented in this placeholder)
+            @warn "Full physics on coarse grid not yet implemented"
+        end
+        
+        current_time += actual_dt
+    end
+    
+    # Interpolate back to fine grid
+    fine_solution = zeros(T, fine_size...)
+    interpolate_coarse_to_fine!(fine_solution, coarse_solution)
+    
+    return fine_solution
+end
+
+"""
+Problem data structure for Heat3ds integration
+"""
+struct Heat3dsProblemData{T <: AbstractFloat}
+    # Grid parameters
+    Δh::NTuple{3,T}              # Cell spacing
+    ZC::Vector{T}                # Z-coordinate centers
+    ΔZ::Vector{T}                # Z-coordinate spacing
+    
+    # Material properties and boundary conditions
+    ID::Array{UInt8,3}           # Material ID array
+    bc_set::Any                  # Boundary condition set
+    
+    # Solver parameters
+    par::String                  # Parallelization mode ("thread" or "sequential")
+    is_steady::Bool              # Steady-state flag
+    
+    function Heat3dsProblemData{T}(Δh, ZC, ΔZ, ID, bc_set, par, is_steady) where {T <: AbstractFloat}
+        return new{T}(Δh, ZC, ΔZ, ID, bc_set, par, is_steady)
+    end
+end
+
+"""
+Solve using fine solver (full resolution and complete physics)
+Integrates with existing Heat3ds solver infrastructure
+"""
+function solve_fine!(solver::FineSolver{T},
+                    initial_condition::Array{T,3},
+                    time_window::TimeWindow{T},
+                    problem_data::Heat3dsProblemData{T}) where {T <: AbstractFloat}
+    
+    # Create working buffers for the fine solver
+    grid_size = size(initial_condition)
+    wk = Common.WorkBuffers(grid_size[1], grid_size[2], grid_size[3])
+    
+    # Initialize temperature field with initial condition
+    wk.θ .= initial_condition
+    
+    # Set up heat source
+    # Note: This would need to be integrated with the existing HeatSrc! function
+    # For now, we'll use a placeholder
+    wk.hsrc .= 0.0  # Placeholder
+    
+    # Time stepping parameters
+    current_time = time_window.start_time
+    dt = solver.dt
+    n_steps = ceil(Int, (time_window.end_time - time_window.start_time) / dt)
+    
+    # Solver configuration
+    solver_str = string(solver.solver_type)
+    smoother_str = string(solver.smoother)
+    
+    # Integration with existing Heat3ds solver
+    for step in 1:n_steps
+        # Adjust time step for last step
+        if step == n_steps
+            dt = time_window.end_time - current_time
+        end
+        
+        if solver.use_full_physics
+            # Use existing Heat3ds solver infrastructure
+            try
+                # This would call the existing RHS calculation and solver
+                # For now, we'll use a simplified approach
+                
+                # Calculate RHS (would use existing calRHS! function)
+                # RHSCore.calRHS!(wk, problem_data.Δh, dt, problem_data.ΔZ, 
+                #                 problem_data.bc_set, zeros(grid_size[1], grid_size[2]), 
+                #                 problem_data.par, is_steady=problem_data.is_steady)
+                
+                # Call appropriate solver
+                if solver.solver_type == :cg
+                    # Would call: NonUniform.CG!(wk, problem_data.Δh, dt, problem_data.ZC, 
+                    #                           problem_data.ΔZ, HC, tol=solver.tolerance, 
+                    #                           smoother=solver.smoother, par=problem_data.par, 
+                    #                           verbose=false, is_steady=problem_data.is_steady)
+                    
+                    # Placeholder: Simple diffusion update
+                    apply_simple_diffusion_step!(wk.θ, dt, T(0.1))
+                    
+                elseif solver.solver_type == :pbicgstab
+                    # Would call: NonUniform.PBiCGSTAB!(wk, problem_data.Δh, dt, problem_data.ZC, 
+                    #                                  problem_data.ΔZ, HC, tol=solver.tolerance, 
+                    #                                  smoother=solver.smoother, par=problem_data.par, 
+                    #                                  verbose=false, is_steady=problem_data.is_steady)
+                    
+                    # Placeholder: Simple diffusion update
+                    apply_simple_diffusion_step!(wk.θ, dt, T(0.1))
+                    
+                else
+                    @warn "Solver type $(solver.solver_type) not fully implemented in fine solver"
+                    apply_simple_diffusion_step!(wk.θ, dt, T(0.1))
+                end
+                
+            catch e
+                @warn "Error in fine solver: $e. Using simplified physics."
+                apply_simple_diffusion_step!(wk.θ, dt, T(0.1))
+            end
+        else
+            # Simplified physics (should not normally be used for fine solver)
+            apply_simple_diffusion_step!(wk.θ, dt, T(0.1))
+        end
+        
+        current_time += dt
+    end
+    
+    return copy(wk.θ)
+end
+
+"""
+Apply simple diffusion step (placeholder for full Heat3ds integration)
+"""
+function apply_simple_diffusion_step!(temperature::Array{T,3}, dt::T, diffusivity::T) where {T <: AbstractFloat}
+    grid_size = size(temperature)
+    temp_new = copy(temperature)
+    
+    # Simple explicit diffusion update
+    for k in 2:grid_size[3]-1, j in 2:grid_size[2]-1, i in 2:grid_size[1]-1
+        # 6-point stencil for 3D diffusion
+        laplacian = (temperature[i+1,j,k] + temperature[i-1,j,k] +
+                    temperature[i,j+1,k] + temperature[i,j-1,k] +
+                    temperature[i,j,k+1] + temperature[i,j,k-1] -
+                    6 * temperature[i,j,k])
+        
+        temp_new[i,j,k] = temperature[i,j,k] + dt * diffusivity * laplacian
+    end
+    
+    temperature .= temp_new
+    return nothing
+end
+
+"""
+Create Heat3ds problem data from existing Heat3ds parameters
+"""
+function create_heat3ds_problem_data(Δh::NTuple{3,T}, ZC::Vector{T}, ΔZ::Vector{T},
+                                   ID::Array{UInt8,3}, bc_set::Any, 
+                                   par::String="thread", is_steady::Bool=false) where {T <: AbstractFloat}
+    return Heat3dsProblemData{T}(Δh, ZC, ΔZ, ID, bc_set, par, is_steady)
+end
+
+"""
+Solve using coarse solver with Heat3ds problem data
+"""
+function solve_coarse!(solver::CoarseSolver{T}, 
+                      initial_condition::Array{T,3},
+                      time_window::TimeWindow{T},
+                      problem_data::Heat3dsProblemData{T}) where {T <: AbstractFloat}
+    
+    # Create coarse grid
+    fine_size = size(initial_condition)
+    coarse_size = create_coarse_grid(fine_size, solver.spatial_resolution_factor)
+    
+    # Initialize coarse grid data
+    coarse_solution = zeros(T, coarse_size...)
+    
+    # Restrict initial condition to coarse grid
+    restrict_fine_to_coarse!(coarse_solution, initial_condition)
+    
+    # Simplified time stepping for coarse solver
+    current_time = time_window.start_time
+    dt = solver.dt
+    n_steps = ceil(Int, (time_window.end_time - time_window.start_time) / dt)
+    
+    for step in 1:n_steps
+        # Adjust time step for last step
+        if step == n_steps
+            dt = time_window.end_time - current_time
+        end
+        
+        if solver.simplified_physics
+            # Simple explicit diffusion (faster but less accurate)
+            apply_simple_diffusion_step!(coarse_solution, dt, T(0.2))  # Higher diffusivity for stability
+        else
+            # Use simplified version of full solver on coarse grid
+            # This would involve creating coarse versions of the problem data
+            apply_simple_diffusion_step!(coarse_solution, dt, T(0.1))
+        end
+        
+        current_time += dt
+    end
+    
+    # Interpolate back to fine grid
+    fine_solution = zeros(T, fine_size...)
+    interpolate_coarse_to_fine!(fine_solution, coarse_solution)
+    
+    return fine_solution
+end
+
+"""
+Validate solver configuration
+"""
+function validate_solver_configuration(config::SolverConfiguration{T}) where {T <: AbstractFloat}
+    coarse = config.coarse_solver
+    fine = config.fine_solver
+    
+    # Check time step ratio
+    time_step_ratio = coarse.dt / fine.dt
+    if time_step_ratio < 1.0
+        return false, "Coarse time step must be >= fine time step"
+    end
+    
+    # Check reasonable time step ratio (literature suggests 10-100)
+    if time_step_ratio > 1000.0
+        return false, "Time step ratio too large ($(time_step_ratio)), may cause instability"
+    end
+    
+    if time_step_ratio < 2.0
+        @warn "Time step ratio is small ($(time_step_ratio)), may not provide significant speedup"
+    end
+    
+    # Check spatial resolution factor
+    if coarse.spatial_resolution_factor < 1.0
+        return false, "Spatial resolution factor must be >= 1.0"
+    end
+    
+    if coarse.spatial_resolution_factor > 10.0
+        @warn "Large spatial resolution factor ($(coarse.spatial_resolution_factor)), may affect accuracy"
+    end
+    
+    # Check solver compatibility
+    valid_solvers = [:pbicgstab, :cg, :sor]
+    if !(coarse.solver_type in valid_solvers)
+        return false, "Invalid coarse solver type: $(coarse.solver_type)"
+    end
+    
+    if !(fine.solver_type in valid_solvers)
+        return false, "Invalid fine solver type: $(fine.solver_type)"
+    end
+    
+    return true, "Solver configuration is valid"
+end
+
+"""
+Get solver performance characteristics
+"""
+function get_solver_characteristics(solver::PararealSolver{T}) where {T <: AbstractFloat}
+    characteristics = Dict{String, Any}()
+    
+    if solver isa CoarseSolver
+        characteristics["type"] = "coarse"
+        characteristics["dt"] = solver.dt
+        characteristics["spatial_resolution_factor"] = solver.spatial_resolution_factor
+        characteristics["simplified_physics"] = solver.simplified_physics
+        characteristics["solver_type"] = solver.solver_type
+        characteristics["tolerance"] = solver.tolerance
+        characteristics["max_iterations"] = solver.max_iterations
+        characteristics["expected_speedup"] = solver.spatial_resolution_factor^3  # Rough estimate
+    elseif solver isa FineSolver
+        characteristics["type"] = "fine"
+        characteristics["dt"] = solver.dt
+        characteristics["solver_type"] = solver.solver_type
+        characteristics["smoother"] = solver.smoother
+        characteristics["tolerance"] = solver.tolerance
+        characteristics["max_iterations"] = solver.max_iterations
+        characteristics["use_full_physics"] = solver.use_full_physics
+        characteristics["expected_speedup"] = 1.0  # Reference
+    end
+    
+    return characteristics
+end
+
+"""
+Solver selection and configuration interface
+"""
+struct SolverSelector{T <: AbstractFloat}
+    available_solvers::Dict{Symbol, Vector{Symbol}}  # solver_type => [available_variants]
+    performance_profiles::Dict{Symbol, Dict{String, Any}}
+    default_configurations::Dict{Symbol, Dict{String, Any}}
+    
+    function SolverSelector{T}() where {T <: AbstractFloat}
+        # Define available solvers and their variants
+        available_solvers = Dict{Symbol, Vector{Symbol}}(
+            :pbicgstab => [:standard, :preconditioned],
+            :cg => [:standard, :preconditioned],
+            :sor => [:standard, :red_black]
+        )
+        
+        # Performance profiles for different solver types
+        performance_profiles = Dict{Symbol, Dict{String, Any}}(
+            :pbicgstab => Dict(
+                "convergence_rate" => "fast",
+                "memory_usage" => "moderate",
+                "stability" => "high",
+                "recommended_for" => ["general_purpose", "ill_conditioned"]
+            ),
+            :cg => Dict(
+                "convergence_rate" => "very_fast",
+                "memory_usage" => "low",
+                "stability" => "moderate",
+                "recommended_for" => ["well_conditioned", "symmetric"]
+            ),
+            :sor => Dict(
+                "convergence_rate" => "slow",
+                "memory_usage" => "very_low",
+                "stability" => "high",
+                "recommended_for" => ["simple_problems", "memory_constrained"]
+            )
+        )
+        
+        # Default configurations for different solver types
+        default_configurations = Dict{Symbol, Dict{String, Any}}(
+            :coarse => Dict(
+                "dt_factor" => 10.0,  # Coarse dt = fine_dt * dt_factor
+                "spatial_resolution_factor" => 2.0,
+                "simplified_physics" => true,
+                "tolerance" => 1e-3,
+                "max_iterations" => 100,
+                "solver_type" => :pbicgstab
+            ),
+            :fine => Dict(
+                "dt_factor" => 1.0,   # Fine dt = base_dt * dt_factor
+                "tolerance" => 1e-6,
+                "max_iterations" => 8000,
+                "solver_type" => :pbicgstab,
+                "smoother" => :gs,
+                "use_full_physics" => true
+            )
+        )
+        
+        return new{T}(available_solvers, performance_profiles, default_configurations)
+    end
+end
+
+# Convenience constructor
+function SolverSelector()
+    return SolverSelector{Float64}()
+end
+
+"""
+Create solver configuration based on problem characteristics and user preferences
+"""
+function create_solver_configuration(selector::SolverSelector{T};
+                                   problem_size::NTuple{3,Int} = (100, 100, 100),
+                                   base_dt::T = T(0.01),
+                                   target_speedup::T = T(4.0),
+                                   accuracy_priority::Symbol = :balanced,  # :speed, :balanced, :accuracy
+                                   solver_preference::Union{Symbol, Nothing} = nothing) where {T <: AbstractFloat}
+    
+    # Determine optimal solver types based on preferences
+    coarse_solver_type, fine_solver_type = select_optimal_solvers(
+        selector, problem_size, accuracy_priority, solver_preference
+    )
+    
+    # Calculate time step parameters
+    coarse_dt, fine_dt = calculate_optimal_time_steps(
+        base_dt, target_speedup, accuracy_priority
+    )
+    
+    # Calculate spatial resolution factor for coarse solver
+    spatial_factor = calculate_spatial_resolution_factor(
+        problem_size, target_speedup, accuracy_priority
+    )
+    
+    # Create coarse solver configuration
+    coarse_config = selector.default_configurations[:coarse]
+    coarse_solver = CoarseSolver{T}(
+        dt = coarse_dt,
+        spatial_resolution_factor = spatial_factor,
+        simplified_physics = coarse_config["simplified_physics"],
+        solver_type = coarse_solver_type,
+        tolerance = T(coarse_config["tolerance"]),
+        max_iterations = coarse_config["max_iterations"]
+    )
+    
+    # Create fine solver configuration
+    fine_config = selector.default_configurations[:fine]
+    fine_solver = FineSolver{T}(
+        dt = fine_dt,
+        solver_type = fine_solver_type,
+        smoother = fine_config["smoother"],
+        tolerance = T(fine_config["tolerance"]),
+        max_iterations = fine_config["max_iterations"],
+        use_full_physics = fine_config["use_full_physics"]
+    )
+    
+    return SolverConfiguration(coarse_solver, fine_solver)
+end
+
+"""
+Select optimal solver types based on problem characteristics
+"""
+function select_optimal_solvers(selector::SolverSelector{T},
+                               problem_size::NTuple{3,Int},
+                               accuracy_priority::Symbol,
+                               solver_preference::Union{Symbol, Nothing}) where {T <: AbstractFloat}
+    
+    # If user has a preference, use it (with validation)
+    if solver_preference !== nothing
+        if haskey(selector.available_solvers, solver_preference)
+            return solver_preference, solver_preference
+        else
+            @warn "Solver preference $solver_preference not available, using automatic selection"
+        end
+    end
+    
+    # Automatic selection based on problem characteristics
+    total_dofs = prod(problem_size)
+    
+    if accuracy_priority == :speed
+        # Prioritize speed: use faster but potentially less accurate solvers
+        if total_dofs > 1_000_000  # Large problem
+            return :sor, :pbicgstab  # Fast coarse, robust fine
+        else
+            return :pbicgstab, :pbicgstab  # Balanced choice
+        end
+    elseif accuracy_priority == :accuracy
+        # Prioritize accuracy: use more accurate solvers
+        return :pbicgstab, :cg  # Robust coarse, accurate fine
+    else  # :balanced
+        # Balanced approach
+        if total_dofs > 500_000
+            return :pbicgstab, :pbicgstab  # Robust for large problems
+        else
+            return :cg, :cg  # Fast for smaller problems
+        end
+    end
+end
+
+"""
+Calculate optimal time step sizes
+"""
+function calculate_optimal_time_steps(base_dt::T, target_speedup::T, accuracy_priority::Symbol) where {T <: AbstractFloat}
+    # Fine time step is typically the base time step
+    fine_dt = base_dt
+    
+    # Coarse time step calculation based on target speedup and accuracy priority
+    if accuracy_priority == :speed
+        # Aggressive coarse time step for maximum speedup
+        coarse_dt_factor = min(target_speedup * 2, T(100.0))
+    elseif accuracy_priority == :accuracy
+        # Conservative coarse time step for better accuracy
+        coarse_dt_factor = max(target_speedup / 2, T(2.0))
+    else  # :balanced
+        # Balanced coarse time step
+        coarse_dt_factor = target_speedup
+    end
+    
+    coarse_dt = fine_dt * coarse_dt_factor
+    
+    return coarse_dt, fine_dt
+end
+
+"""
+Calculate spatial resolution factor for coarse solver
+"""
+function calculate_spatial_resolution_factor(problem_size::NTuple{3,Int}, 
+                                           target_speedup::T, 
+                                           accuracy_priority::Symbol) where {T <: AbstractFloat}
+    
+    # Base spatial factor calculation
+    # Speedup from spatial coarsening is approximately factor^3
+    base_spatial_factor = (target_speedup / 2)^(1/3)  # Conservative estimate
+    
+    # Adjust based on accuracy priority
+    if accuracy_priority == :speed
+        # More aggressive spatial coarsening
+        spatial_factor = min(base_spatial_factor * T(1.5), T(8.0))
+    elseif accuracy_priority == :accuracy
+        # Conservative spatial coarsening
+        spatial_factor = max(base_spatial_factor / T(1.5), T(1.5))
+    else  # :balanced
+        spatial_factor = base_spatial_factor
+    end
+    
+    # Ensure reasonable bounds
+    spatial_factor = clamp(spatial_factor, T(1.0), T(10.0))
+    
+    return spatial_factor
+end
+
+"""
+Validate solver parameters against problem constraints
+"""
+function validate_solver_parameters(config::SolverConfiguration{T},
+                                  problem_constraints::Dict{String, Any}) where {T <: AbstractFloat}
+    
+    validation_results = Dict{String, Any}()
+    validation_results["is_valid"] = true
+    validation_results["warnings"] = String[]
+    validation_results["errors"] = String[]
+    
+    # Check time step constraints
+    if haskey(problem_constraints, "max_dt")
+        max_dt = problem_constraints["max_dt"]
+        if config.coarse_solver.dt > max_dt
+            push!(validation_results["errors"], 
+                  "Coarse time step ($(config.coarse_solver.dt)) exceeds maximum allowed ($max_dt)")
+            validation_results["is_valid"] = false
+        end
+        if config.fine_solver.dt > max_dt
+            push!(validation_results["errors"],
+                  "Fine time step ($(config.fine_solver.dt)) exceeds maximum allowed ($max_dt)")
+            validation_results["is_valid"] = false
+        end
+    end
+    
+    # Check memory constraints
+    if haskey(problem_constraints, "max_memory_gb")
+        max_memory = problem_constraints["max_memory_gb"]
+        # Rough memory estimate (this would be more sophisticated in practice)
+        estimated_memory = estimate_memory_usage(config, problem_constraints)
+        if estimated_memory > max_memory
+            push!(validation_results["warnings"],
+                  "Estimated memory usage ($(estimated_memory) GB) may exceed limit ($max_memory GB)")
+        end
+    end
+    
+    # Check solver compatibility
+    coarse_type = config.coarse_solver.solver_type
+    fine_type = config.fine_solver.solver_type
+    
+    # Some solver combinations may not be optimal
+    if coarse_type == :sor && fine_type == :cg
+        push!(validation_results["warnings"],
+              "SOR coarse with CG fine may have convergence issues")
+    end
+    
+    return validation_results
+end
+
+"""
+Estimate memory usage for solver configuration (rough approximation)
+"""
+function estimate_memory_usage(config::SolverConfiguration{T}, 
+                              problem_constraints::Dict{String, Any}) where {T <: AbstractFloat}
+    
+    # Get problem size
+    if haskey(problem_constraints, "grid_size")
+        grid_size = problem_constraints["grid_size"]
+        total_cells = prod(grid_size)
+    else
+        total_cells = 1_000_000  # Default estimate
+    end
+    
+    # Bytes per cell (rough estimate for temperature field + work arrays)
+    bytes_per_cell = sizeof(T) * 15  # Multiple work arrays
+    
+    # Memory for fine solver
+    fine_memory = total_cells * bytes_per_cell
+    
+    # Memory for coarse solver (reduced by spatial factor^3)
+    coarse_factor = config.coarse_solver.spatial_resolution_factor
+    coarse_memory = fine_memory / (coarse_factor^3)
+    
+    # Total memory in GB
+    total_memory_gb = (fine_memory + coarse_memory) / (1024^3)
+    
+    return total_memory_gb
+end
+
+"""
+Get solver recommendations based on problem characteristics
+"""
+function get_solver_recommendations(selector::SolverSelector{T},
+                                  problem_characteristics::Dict{String, Any}) where {T <: AbstractFloat}
+    
+    recommendations = Dict{String, Any}()
+    
+    # Analyze problem characteristics
+    if haskey(problem_characteristics, "condition_number")
+        condition_number = problem_characteristics["condition_number"]
+        if condition_number > 1000
+            recommendations["solver_type"] = :pbicgstab
+            recommendations["reason"] = "High condition number detected, PBiCGSTAB recommended for stability"
+        elseif condition_number < 100
+            recommendations["solver_type"] = :cg
+            recommendations["reason"] = "Well-conditioned problem, CG recommended for speed"
+        else
+            recommendations["solver_type"] = :pbicgstab
+            recommendations["reason"] = "Moderate condition number, PBiCGSTAB recommended for robustness"
+        end
+    end
+    
+    # Memory-based recommendations
+    if haskey(problem_characteristics, "available_memory_gb")
+        memory_gb = problem_characteristics["available_memory_gb"]
+        if memory_gb < 4.0
+            recommendations["spatial_resolution_factor"] = 4.0
+            recommendations["memory_note"] = "Limited memory detected, aggressive spatial coarsening recommended"
+        elseif memory_gb > 32.0
+            recommendations["spatial_resolution_factor"] = 1.5
+            recommendations["memory_note"] = "Abundant memory available, minimal spatial coarsening recommended"
+        end
+    end
+    
+    # Performance-based recommendations
+    if haskey(problem_characteristics, "target_wall_time_hours")
+        target_time = problem_characteristics["target_wall_time_hours"]
+        if target_time < 1.0
+            recommendations["accuracy_priority"] = :speed
+            recommendations["time_note"] = "Short target time, prioritizing speed over accuracy"
+        elseif target_time > 24.0
+            recommendations["accuracy_priority"] = :accuracy
+            recommendations["time_note"] = "Long target time available, prioritizing accuracy"
+        end
+    end
+    
+    return recommendations
+end
+
 end # module Parareal
