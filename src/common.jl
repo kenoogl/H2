@@ -5,7 +5,8 @@ using FLoops
 
 export BoundaryType, ISOTHERMAL, HEAT_FLUX, CONVECTION
 export WorkBuffers, ItrMax, tol, FloatMin, ω, Q_src
-export λf, get_backend, myfill!, mycopy!
+export λf, get_backend, get_backend_mpi, get_hybrid_backend
+export myfill!, mycopy!, myfill_mpi!, mycopy_mpi!, myfill_hybrid!, mycopy_hybrid!
 
 const ItrMax = 8000
 const tol    = 1.0e-6
@@ -40,6 +41,33 @@ Harmonic mean
 """
 function get_backend(par::String)
     return (par == "thread") ? ThreadedEx() : SequentialEx()
+end
+
+"""
+MPI対応の並列動作バックエンドを返す
+"""
+function get_backend_mpi(par::String, n_threads::Int)
+    if par == "thread" && n_threads > 1
+        return ThreadedEx()
+    else
+        return SequentialEx()
+    end
+end
+
+"""
+ハイブリッド並列化（MPI + Threads）対応のバックエンドを返す
+"""
+function get_hybrid_backend(par::String, mpi_size::Int, n_threads::Int)
+    # MPI processes > 1 and threads > 1 = hybrid parallelization
+    # MPI processes > 1 and threads = 1 = MPI-only parallelization  
+    # MPI processes = 1 and threads > 1 = thread-only parallelization
+    # MPI processes = 1 and threads = 1 = sequential
+    
+    if par == "thread" && n_threads > 1
+        return ThreadedEx()
+    else
+        return SequentialEx()
+    end
 end
 
 
@@ -106,6 +134,50 @@ end
 """
 function mycopy!(dst::AbstractArray{T,3}, src::AbstractArray{T,3}, par::String) where {T}
   backend = get_backend(par)
+  SZ = size(dst)
+  @floop backend for k in 1:SZ[3], j in 1:SZ[2], i in 1:SZ[1]
+    dst[i,j,k] = src[i,j,k]
+  end
+end
+
+"""
+MPI対応の並列化fill
+"""
+function myfill_mpi!(arr::AbstractArray{T,3}, val::T, par::String, n_threads::Int) where {T}
+  backend = get_backend_mpi(par, n_threads)
+  SZ = size(arr)
+  @floop backend for k in 1:SZ[3], j in 1:SZ[2], i in 1:SZ[1]
+    arr[i,j,k] = val
+  end
+end
+
+"""
+MPI対応の並列化copy
+"""
+function mycopy_mpi!(dst::AbstractArray{T,3}, src::AbstractArray{T,3}, par::String, n_threads::Int) where {T}
+  backend = get_backend_mpi(par, n_threads)
+  SZ = size(dst)
+  @floop backend for k in 1:SZ[3], j in 1:SZ[2], i in 1:SZ[1]
+    dst[i,j,k] = src[i,j,k]
+  end
+end
+
+"""
+ハイブリッド並列化対応のfill
+"""
+function myfill_hybrid!(arr::AbstractArray{T,3}, val::T, par::String, mpi_size::Int, n_threads::Int) where {T}
+  backend = get_hybrid_backend(par, mpi_size, n_threads)
+  SZ = size(arr)
+  @floop backend for k in 1:SZ[3], j in 1:SZ[2], i in 1:SZ[1]
+    arr[i,j,k] = val
+  end
+end
+
+"""
+ハイブリッド並列化対応のcopy
+"""
+function mycopy_hybrid!(dst::AbstractArray{T,3}, src::AbstractArray{T,3}, par::String, mpi_size::Int, n_threads::Int) where {T}
+  backend = get_hybrid_backend(par, mpi_size, n_threads)
   SZ = size(dst)
   @floop backend for k in 1:SZ[3], j in 1:SZ[2], i in 1:SZ[1]
     dst[i,j,k] = src[i,j,k]
