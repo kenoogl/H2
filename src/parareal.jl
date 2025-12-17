@@ -4119,4 +4119,1314 @@ function integrate_monitoring!(manager::PararealManager{T},
     return nothing
 end
 
+# ============================================================================
+# Performance Analysis and Reporting Tools
+# ============================================================================
+
+"""
+Detailed timing breakdown analysis structure
+"""
+mutable struct TimingBreakdown{T <: AbstractFloat}
+    # Solver timing breakdown
+    coarse_solver_breakdown::Dict{String, T}
+    fine_solver_breakdown::Dict{String, T}
+    
+    # Communication timing breakdown
+    mpi_communication_breakdown::Dict{String, T}
+    threading_breakdown::Dict{String, T}
+    
+    # Iteration timing
+    iteration_timings::Vector{T}
+    convergence_timings::Vector{T}
+    
+    # Overhead analysis
+    synchronization_overhead::T
+    load_imbalance_overhead::T
+    memory_overhead::T
+    
+    function TimingBreakdown{T}() where {T <: AbstractFloat}
+        return new{T}(
+            Dict{String, T}(),
+            Dict{String, T}(),
+            Dict{String, T}(),
+            Dict{String, T}(),
+            Vector{T}(),
+            Vector{T}(),
+            T(0.0), T(0.0), T(0.0)
+        )
+    end
+end
+
+"""
+Strong and weak scaling analysis structure
+"""
+mutable struct ScalingAnalysis{T <: AbstractFloat}
+    # Strong scaling data (fixed problem size, varying processes)
+    strong_scaling_processes::Vector{Int}
+    strong_scaling_times::Vector{T}
+    strong_scaling_speedups::Vector{T}
+    strong_scaling_efficiencies::Vector{T}
+    
+    # Weak scaling data (proportional problem size and processes)
+    weak_scaling_processes::Vector{Int}
+    weak_scaling_problem_sizes::Vector{Int}
+    weak_scaling_times::Vector{T}
+    weak_scaling_efficiencies::Vector{T}
+    weak_scaling_throughputs::Vector{T}
+    
+    # Theoretical models
+    amdahl_serial_fraction::T
+    amdahl_parallel_fraction::T
+    gustafson_scaled_speedup::Vector{T}
+    
+    # Performance predictions
+    predicted_speedups::Vector{T}
+    predicted_efficiencies::Vector{T}
+    
+    function ScalingAnalysis{T}() where {T <: AbstractFloat}
+        return new{T}(
+            Vector{Int}(), Vector{T}(), Vector{T}(), Vector{T}(),
+            Vector{Int}(), Vector{Int}(), Vector{T}(), Vector{T}(), Vector{T}(),
+            T(0.0), T(0.0), Vector{T}(),
+            Vector{T}(), Vector{T}()
+        )
+    end
+end
+
+"""
+Performance visualization data structure
+"""
+mutable struct PerformanceVisualization{T <: AbstractFloat}
+    # Timing charts data
+    timing_chart_data::Dict{String, Vector{T}}
+    timing_chart_labels::Vector{String}
+    
+    # Scaling plots data
+    scaling_plot_data::Dict{String, Vector{Tuple{Int, T}}}
+    
+    # Efficiency heatmap data
+    efficiency_heatmap::Matrix{T}
+    heatmap_x_labels::Vector{String}
+    heatmap_y_labels::Vector{String}
+    
+    # Performance trend data
+    trend_data::Dict{String, Vector{Tuple{T, T}}}
+    
+    function PerformanceVisualization{T}() where {T <: AbstractFloat}
+        return new{T}(
+            Dict{String, Vector{T}}(),
+            Vector{String}(),
+            Dict{String, Vector{Tuple{Int, T}}}(),
+            Matrix{T}(undef, 0, 0),
+            Vector{String}(),
+            Vector{String}(),
+            Dict{String, Vector{Tuple{T, T}}}()
+        )
+    end
+end
+
+"""
+Comprehensive performance analysis and reporting tool
+"""
+mutable struct PerformanceAnalyzer{T <: AbstractFloat}
+    timing_breakdown::TimingBreakdown{T}
+    scaling_analysis::ScalingAnalysis{T}
+    visualization::PerformanceVisualization{T}
+    
+    # Analysis configuration
+    enable_detailed_timing::Bool
+    enable_scaling_analysis::Bool
+    enable_visualization::Bool
+    
+    # Report generation settings
+    report_format::Symbol  # :text, :html, :json
+    output_directory::String
+    
+    function PerformanceAnalyzer{T}(;
+        enable_detailed_timing::Bool = true,
+        enable_scaling_analysis::Bool = true,
+        enable_visualization::Bool = true,
+        report_format::Symbol = :text,
+        output_directory::String = "performance_reports"
+    ) where {T <: AbstractFloat}
+        
+        return new{T}(
+            TimingBreakdown{T}(),
+            ScalingAnalysis{T}(),
+            PerformanceVisualization{T}(),
+            enable_detailed_timing,
+            enable_scaling_analysis,
+            enable_visualization,
+            report_format,
+            output_directory
+        )
+    end
+end
+
+# Export performance analysis types and functions
+export TimingBreakdown, ScalingAnalysis, PerformanceVisualization, PerformanceAnalyzer
+export create_performance_analyzer, analyze_timing_breakdown!, analyze_scaling_performance!
+export generate_detailed_timing_report, generate_scaling_analysis_report
+export create_performance_visualization, export_performance_data
+export print_timing_breakdown, print_scaling_analysis
+# New performance analysis and reporting exports
+export export_performance_data_csv, generate_performance_comparison_report
+export create_ascii_performance_plots, generate_comprehensive_performance_report
+export generate_performance_recommendations
+
+"""
+Create performance analyzer instance
+"""
+function create_performance_analyzer(::Type{T} = Float64; kwargs...) where {T <: AbstractFloat}
+    return PerformanceAnalyzer{T}(; kwargs...)
+end
+
+"""
+Analyze detailed timing breakdown from performance metrics
+Requirements 10.4: Output detailed timing breakdown for MPI and threading components
+"""
+function analyze_timing_breakdown!(analyzer::PerformanceAnalyzer{T}, 
+                                  metrics_list::Vector{Any}) where {T <: AbstractFloat}
+    
+    if !analyzer.enable_detailed_timing
+        return nothing
+    end
+    
+    breakdown = analyzer.timing_breakdown
+    
+    # Clear previous data
+    empty!(breakdown.coarse_solver_breakdown)
+    empty!(breakdown.fine_solver_breakdown)
+    empty!(breakdown.mpi_communication_breakdown)
+    empty!(breakdown.threading_breakdown)
+    empty!(breakdown.iteration_timings)
+    empty!(breakdown.convergence_timings)
+    
+    # Aggregate timing data from all processes
+    total_processes = length(metrics_list)
+    
+    # Coarse solver breakdown
+    total_coarse_time = T(0.0)
+    total_coarse_calls = 0
+    for metrics in metrics_list
+        total_coarse_time += metrics.timing_data.coarse_solver_time
+        total_coarse_calls += metrics.timing_data.coarse_solver_calls
+    end
+    
+    breakdown.coarse_solver_breakdown["total_time"] = total_coarse_time
+    breakdown.coarse_solver_breakdown["average_time"] = total_coarse_time / max(1, total_processes)
+    breakdown.coarse_solver_breakdown["total_calls"] = T(total_coarse_calls)
+    breakdown.coarse_solver_breakdown["average_time_per_call"] = 
+        total_coarse_calls > 0 ? total_coarse_time / total_coarse_calls : T(0.0)
+    
+    # Fine solver breakdown
+    total_fine_time = T(0.0)
+    total_fine_calls = 0
+    for metrics in metrics_list
+        total_fine_time += metrics.timing_data.fine_solver_time
+        total_fine_calls += metrics.timing_data.fine_solver_calls
+    end
+    
+    breakdown.fine_solver_breakdown["total_time"] = total_fine_time
+    breakdown.fine_solver_breakdown["average_time"] = total_fine_time / max(1, total_processes)
+    breakdown.fine_solver_breakdown["total_calls"] = T(total_fine_calls)
+    breakdown.fine_solver_breakdown["average_time_per_call"] = 
+        total_fine_calls > 0 ? total_fine_time / total_fine_calls : T(0.0)
+    
+    # MPI communication breakdown
+    total_send_time = T(0.0)
+    total_recv_time = T(0.0)
+    total_sync_time = T(0.0)
+    total_broadcast_time = T(0.0)
+    total_allreduce_time = T(0.0)
+    
+    for metrics in metrics_list
+        total_send_time += metrics.communication_metrics.send_time
+        total_recv_time += metrics.communication_metrics.receive_time
+        total_sync_time += metrics.communication_metrics.synchronization_time
+        total_broadcast_time += metrics.communication_metrics.broadcast_time
+        total_allreduce_time += metrics.communication_metrics.allreduce_time
+    end
+    
+    breakdown.mpi_communication_breakdown["send_time"] = total_send_time
+    breakdown.mpi_communication_breakdown["receive_time"] = total_recv_time
+    breakdown.mpi_communication_breakdown["synchronization_time"] = total_sync_time
+    breakdown.mpi_communication_breakdown["broadcast_time"] = total_broadcast_time
+    breakdown.mpi_communication_breakdown["allreduce_time"] = total_allreduce_time
+    breakdown.mpi_communication_breakdown["total_communication_time"] = 
+        total_send_time + total_recv_time + total_sync_time + total_broadcast_time + total_allreduce_time
+    
+    # Threading efficiency analysis
+    total_computation_time = total_coarse_time + total_fine_time
+    total_wall_time = T(0.0)
+    for metrics in metrics_list
+        total_wall_time += metrics.total_wall_time
+    end
+    
+    average_wall_time = total_wall_time / max(1, total_processes)
+    threading_efficiency = total_computation_time > 0 ? total_computation_time / total_wall_time : T(0.0)
+    
+    breakdown.threading_breakdown["total_computation_time"] = total_computation_time
+    breakdown.threading_breakdown["average_wall_time"] = average_wall_time
+    breakdown.threading_breakdown["threading_efficiency"] = threading_efficiency
+    breakdown.threading_breakdown["parallel_fraction"] = threading_efficiency
+    breakdown.threading_breakdown["serial_fraction"] = T(1.0) - threading_efficiency
+    
+    # Calculate overheads
+    total_communication_time = breakdown.mpi_communication_breakdown["total_communication_time"]
+    breakdown.synchronization_overhead = total_sync_time / max(average_wall_time, T(1e-10))
+    breakdown.load_imbalance_overhead = calculate_load_imbalance_overhead(metrics_list)
+    breakdown.memory_overhead = calculate_memory_overhead(metrics_list)
+    
+    return nothing
+end
+
+"""
+Calculate load imbalance overhead from process metrics
+"""
+function calculate_load_imbalance_overhead(metrics_list::Vector{Any})
+    if length(metrics_list) <= 1
+        return 0.0
+    end
+    
+    # Calculate workload distribution
+    workloads = [metrics.timing_data.coarse_solver_time + metrics.timing_data.fine_solver_time 
+                for metrics in metrics_list]
+    
+    max_workload = maximum(workloads)
+    min_workload = minimum(workloads)
+    avg_workload = sum(workloads) / length(workloads)
+    
+    # Load imbalance overhead as fraction of average workload
+    return avg_workload > 0 ? (max_workload - min_workload) / avg_workload : 0.0
+end
+
+"""
+Calculate memory overhead from process metrics
+"""
+function calculate_memory_overhead(metrics_list::Vector{Any})
+    if isempty(metrics_list)
+        return 0.0
+    end
+    
+    # Calculate average memory usage
+    total_peak_memory = sum(metrics.peak_memory_usage_mb for metrics in metrics_list)
+    total_avg_memory = sum(metrics.average_memory_usage_mb for metrics in metrics_list)
+    
+    # Memory overhead as ratio of peak to average
+    return total_avg_memory > 0 ? (total_peak_memory - total_avg_memory) / total_avg_memory : 0.0
+end
+
+"""
+Analyze strong and weak scaling performance
+Requirements 10.5: Report strong and weak scaling metrics for the hybrid parallelization
+"""
+function analyze_scaling_performance!(analyzer::PerformanceAnalyzer{T},
+                                    process_counts::Vector{Int},
+                                    execution_times::Vector{T},
+                                    problem_sizes::Vector{Int} = Int[]) where {T <: AbstractFloat}
+    
+    if !analyzer.enable_scaling_analysis
+        return nothing
+    end
+    
+    scaling = analyzer.scaling_analysis
+    
+    # Determine if this is strong or weak scaling based on problem sizes
+    is_weak_scaling = !isempty(problem_sizes) && length(problem_sizes) == length(process_counts)
+    
+    if is_weak_scaling
+        # Weak scaling analysis
+        append!(scaling.weak_scaling_processes, process_counts)
+        append!(scaling.weak_scaling_problem_sizes, problem_sizes)
+        append!(scaling.weak_scaling_times, execution_times)
+        
+        # Calculate weak scaling efficiency (relative to baseline)
+        if !isempty(scaling.weak_scaling_times)
+            baseline_time = scaling.weak_scaling_times[1]
+            for (i, time) in enumerate(execution_times)
+                efficiency = baseline_time / time
+                push!(scaling.weak_scaling_efficiencies, efficiency)
+                
+                # Throughput (problem size / time)
+                throughput = problem_sizes[i] / time
+                push!(scaling.weak_scaling_throughputs, throughput)
+            end
+        end
+    else
+        # Strong scaling analysis
+        append!(scaling.strong_scaling_processes, process_counts)
+        append!(scaling.strong_scaling_times, execution_times)
+        
+        # Calculate speedup and efficiency
+        if !isempty(scaling.strong_scaling_times)
+            baseline_time = scaling.strong_scaling_times[1]  # Single process time
+            for (i, time) in enumerate(execution_times)
+                speedup = baseline_time / time
+                efficiency = speedup / process_counts[i]
+                
+                push!(scaling.strong_scaling_speedups, speedup)
+                push!(scaling.strong_scaling_efficiencies, efficiency)
+            end
+        end
+    end
+    
+    # Fit Amdahl's law parameters for strong scaling
+    if length(scaling.strong_scaling_processes) >= 2
+        fit_amdahl_law_parameters!(scaling)
+    end
+    
+    # Generate performance predictions
+    generate_performance_predictions!(scaling, process_counts)
+    
+    return nothing
+end
+
+"""
+Fit Amdahl's law parameters from strong scaling data
+"""
+function fit_amdahl_law_parameters!(scaling::ScalingAnalysis{T}) where {T <: AbstractFloat}
+    if length(scaling.strong_scaling_speedups) < 2
+        return nothing
+    end
+    
+    # Use least squares fitting to estimate serial fraction
+    # Amdahl's law: S(p) = 1 / (f + (1-f)/p) where f is serial fraction
+    # Rearranging: 1/S(p) = f + (1-f)/p
+    
+    processes = scaling.strong_scaling_processes
+    speedups = scaling.strong_scaling_speedups
+    
+    # Create matrices for least squares: y = A * x
+    n = length(processes)
+    A = zeros(T, n, 2)
+    y = zeros(T, n)
+    
+    for i in 1:n
+        A[i, 1] = T(1.0)  # Coefficient for serial fraction f
+        A[i, 2] = T(1.0) / T(processes[i])  # Coefficient for (1-f)
+        y[i] = T(1.0) / speedups[i]
+    end
+    
+    # Solve least squares: x = (A^T * A)^(-1) * A^T * y
+    try
+        AtA = A' * A
+        Aty = A' * y
+        x = AtA \ Aty
+        
+        scaling.amdahl_serial_fraction = max(T(0.0), min(T(1.0), x[1]))
+        scaling.amdahl_parallel_fraction = T(1.0) - scaling.amdahl_serial_fraction
+    catch
+        # Fallback to simple estimation
+        scaling.amdahl_serial_fraction = T(0.1)  # Default 10% serial
+        scaling.amdahl_parallel_fraction = T(0.9)
+    end
+    
+    return nothing
+end
+
+"""
+Generate performance predictions based on scaling models
+"""
+function generate_performance_predictions!(scaling::ScalingAnalysis{T}, 
+                                         target_processes::Vector{Int}) where {T <: AbstractFloat}
+    
+    empty!(scaling.predicted_speedups)
+    empty!(scaling.predicted_efficiencies)
+    
+    f = scaling.amdahl_serial_fraction
+    
+    for p in target_processes
+        # Amdahl's law prediction
+        predicted_speedup = T(1.0) / (f + (T(1.0) - f) / T(p))
+        predicted_efficiency = predicted_speedup / T(p)
+        
+        push!(scaling.predicted_speedups, predicted_speedup)
+        push!(scaling.predicted_efficiencies, predicted_efficiency)
+    end
+    
+    return nothing
+end
+
+"""
+Generate detailed timing breakdown report
+Requirements 10.4: Output detailed timing breakdown for MPI and threading components
+"""
+function generate_detailed_timing_report(analyzer::PerformanceAnalyzer{T}) where {T <: AbstractFloat}
+    
+    if !analyzer.enable_detailed_timing
+        return "Detailed timing analysis is disabled."
+    end
+    
+    breakdown = analyzer.timing_breakdown
+    report = String[]
+    
+    push!(report, "=" ^ 80)
+    push!(report, "DETAILED TIMING BREAKDOWN REPORT")
+    push!(report, "=" ^ 80)
+    push!(report, "")
+    
+    # Coarse solver timing
+    push!(report, "Coarse Solver Performance:")
+    push!(report, "-" ^ 40)
+    for (key, value) in breakdown.coarse_solver_breakdown
+        if key == "total_calls"
+            push!(report, "  $(rpad(key, 25)): $(Int(value))")
+        else
+            push!(report, "  $(rpad(key, 25)): $(round(value, digits=6)) seconds")
+        end
+    end
+    push!(report, "")
+    
+    # Fine solver timing
+    push!(report, "Fine Solver Performance:")
+    push!(report, "-" ^ 40)
+    for (key, value) in breakdown.fine_solver_breakdown
+        if key == "total_calls"
+            push!(report, "  $(rpad(key, 25)): $(Int(value))")
+        else
+            push!(report, "  $(rpad(key, 25)): $(round(value, digits=6)) seconds")
+        end
+    end
+    push!(report, "")
+    
+    # MPI communication timing
+    push!(report, "MPI Communication Breakdown:")
+    push!(report, "-" ^ 40)
+    for (key, value) in breakdown.mpi_communication_breakdown
+        push!(report, "  $(rpad(key, 25)): $(round(value, digits=6)) seconds")
+    end
+    push!(report, "")
+    
+    # Threading analysis
+    push!(report, "Threading Performance Analysis:")
+    push!(report, "-" ^ 40)
+    for (key, value) in breakdown.threading_breakdown
+        if occursin("efficiency", key) || occursin("fraction", key)
+            push!(report, "  $(rpad(key, 25)): $(round(value * 100, digits=2))%")
+        else
+            push!(report, "  $(rpad(key, 25)): $(round(value, digits=6)) seconds")
+        end
+    end
+    push!(report, "")
+    
+    # Overhead analysis
+    push!(report, "Overhead Analysis:")
+    push!(report, "-" ^ 40)
+    push!(report, "  $(rpad("Synchronization overhead", 25)): $(round(breakdown.synchronization_overhead * 100, digits=2))%")
+    push!(report, "  $(rpad("Load imbalance overhead", 25)): $(round(breakdown.load_imbalance_overhead * 100, digits=2))%")
+    push!(report, "  $(rpad("Memory overhead", 25)): $(round(breakdown.memory_overhead * 100, digits=2))%")
+    push!(report, "")
+    
+    # Performance recommendations
+    push!(report, "Performance Recommendations:")
+    push!(report, "-" ^ 40)
+    
+    if breakdown.synchronization_overhead > 0.1
+        push!(report, "  • High synchronization overhead detected ($(round(breakdown.synchronization_overhead * 100, digits=1))%)")
+        push!(report, "    Consider reducing MPI communication frequency or using asynchronous operations")
+    end
+    
+    if breakdown.load_imbalance_overhead > 0.2
+        push!(report, "  • Significant load imbalance detected ($(round(breakdown.load_imbalance_overhead * 100, digits=1))%)")
+        push!(report, "    Consider dynamic load balancing or better work distribution")
+    end
+    
+    threading_eff = get(breakdown.threading_breakdown, "threading_efficiency", T(0.0))
+    if threading_eff < 0.7
+        push!(report, "  • Low threading efficiency ($(round(threading_eff * 100, digits=1))%)")
+        push!(report, "    Consider optimizing thread utilization or reducing serial sections")
+    end
+    
+    push!(report, "")
+    push!(report, "=" ^ 80)
+    
+    return join(report, "\n")
+end
+
+"""
+Generate scaling analysis report
+Requirements 10.5: Report strong and weak scaling metrics for the hybrid parallelization
+"""
+function generate_scaling_analysis_report(analyzer::PerformanceAnalyzer{T}) where {T <: AbstractFloat}
+    
+    if !analyzer.enable_scaling_analysis
+        return "Scaling analysis is disabled."
+    end
+    
+    scaling = analyzer.scaling_analysis
+    report = String[]
+    
+    push!(report, "=" ^ 80)
+    push!(report, "SCALING PERFORMANCE ANALYSIS REPORT")
+    push!(report, "=" ^ 80)
+    push!(report, "")
+    
+    # Strong scaling analysis
+    if !isempty(scaling.strong_scaling_processes)
+        push!(report, "Strong Scaling Analysis:")
+        push!(report, "-" ^ 40)
+        push!(report, "$(rpad("Processes", 12)) $(rpad("Time (s)", 12)) $(rpad("Speedup", 12)) $(rpad("Efficiency", 12))")
+        push!(report, "-" ^ 48)
+        
+        for i in 1:length(scaling.strong_scaling_processes)
+            p = scaling.strong_scaling_processes[i]
+            t = scaling.strong_scaling_times[i]
+            s = scaling.strong_scaling_speedups[i]
+            e = scaling.strong_scaling_efficiencies[i]
+            
+            push!(report, "$(rpad(string(p), 12)) $(rpad(string(round(t, digits=4)), 12)) $(rpad(string(round(s, digits=2)), 12)) $(rpad(string(round(e * 100, digits=1)) * "%", 12))")
+        end
+        push!(report, "")
+        
+        # Amdahl's law analysis
+        push!(report, "Amdahl's Law Analysis:")
+        push!(report, "  Serial fraction (f):    $(round(scaling.amdahl_serial_fraction * 100, digits=2))%")
+        push!(report, "  Parallel fraction (1-f): $(round(scaling.amdahl_parallel_fraction * 100, digits=2))%")
+        push!(report, "  Theoretical max speedup: $(round(1.0 / scaling.amdahl_serial_fraction, digits=2))")
+        push!(report, "")
+    end
+    
+    # Weak scaling analysis
+    if !isempty(scaling.weak_scaling_processes)
+        push!(report, "Weak Scaling Analysis:")
+        push!(report, "-" ^ 40)
+        push!(report, "$(rpad("Processes", 12)) $(rpad("Problem Size", 15)) $(rpad("Time (s)", 12)) $(rpad("Efficiency", 12)) $(rpad("Throughput", 12))")
+        push!(report, "-" ^ 63)
+        
+        for i in 1:length(scaling.weak_scaling_processes)
+            p = scaling.weak_scaling_processes[i]
+            size = scaling.weak_scaling_problem_sizes[i]
+            t = scaling.weak_scaling_times[i]
+            e = scaling.weak_scaling_efficiencies[i]
+            throughput = scaling.weak_scaling_throughputs[i]
+            
+            push!(report, "$(rpad(string(p), 12)) $(rpad(string(size), 15)) $(rpad(string(round(t, digits=4)), 12)) $(rpad(string(round(e * 100, digits=1)) * "%", 12)) $(rpad(string(round(throughput, digits=2)), 12))")
+        end
+        push!(report, "")
+    end
+    
+    # Performance predictions
+    if !isempty(scaling.predicted_speedups)
+        push!(report, "Performance Predictions (Amdahl's Law):")
+        push!(report, "-" ^ 40)
+        push!(report, "$(rpad("Processes", 12)) $(rpad("Predicted Speedup", 18)) $(rpad("Predicted Efficiency", 20))")
+        push!(report, "-" ^ 50)
+        
+        target_processes = [1, 2, 4, 8, 16, 32, 64, 128]
+        for p in target_processes
+            if p <= length(scaling.predicted_speedups)
+                s = scaling.predicted_speedups[p]
+                e = scaling.predicted_efficiencies[p]
+                push!(report, "$(rpad(string(p), 12)) $(rpad(string(round(s, digits=2)), 18)) $(rpad(string(round(e * 100, digits=1)) * "%", 20))")
+            end
+        end
+        push!(report, "")
+    end
+    
+    # Scaling recommendations
+    push!(report, "Scaling Recommendations:")
+    push!(report, "-" ^ 40)
+    
+    if !isempty(scaling.strong_scaling_efficiencies)
+        max_efficiency = maximum(scaling.strong_scaling_efficiencies)
+        optimal_processes = scaling.strong_scaling_processes[argmax(scaling.strong_scaling_efficiencies)]
+        
+        push!(report, "  • Optimal process count for strong scaling: $optimal_processes processes")
+        push!(report, "    (Efficiency: $(round(max_efficiency * 100, digits=1))%)")
+        
+        if scaling.amdahl_serial_fraction > 0.2
+            push!(report, "  • High serial fraction ($(round(scaling.amdahl_serial_fraction * 100, digits=1))%) limits scalability")
+            push!(report, "    Consider parallelizing serial sections or using different algorithms")
+        end
+    end
+    
+    if !isempty(scaling.weak_scaling_efficiencies)
+        avg_weak_efficiency = sum(scaling.weak_scaling_efficiencies) / length(scaling.weak_scaling_efficiencies)
+        if avg_weak_efficiency < 0.8
+            push!(report, "  • Weak scaling efficiency is below 80% ($(round(avg_weak_efficiency * 100, digits=1))%)")
+            push!(report, "    Consider optimizing memory bandwidth or reducing communication overhead")
+        end
+    end
+    
+    push!(report, "")
+    push!(report, "=" ^ 80)
+    
+    return join(report, "\n")
+end
+
+"""
+Create performance visualization data
+"""
+function create_performance_visualization!(analyzer::PerformanceAnalyzer{T}) where {T <: AbstractFloat}
+    
+    if !analyzer.enable_visualization
+        return nothing
+    end
+    
+    viz = analyzer.visualization
+    breakdown = analyzer.timing_breakdown
+    scaling = analyzer.scaling_analysis
+    
+    # Clear previous data
+    empty!(viz.timing_chart_data)
+    empty!(viz.timing_chart_labels)
+    empty!(viz.scaling_plot_data)
+    empty!(viz.trend_data)
+    
+    # Timing chart data
+    if !isempty(breakdown.coarse_solver_breakdown)
+        coarse_times = [breakdown.coarse_solver_breakdown["total_time"]]
+        fine_times = [breakdown.fine_solver_breakdown["total_time"]]
+        comm_times = [breakdown.mpi_communication_breakdown["total_communication_time"]]
+        
+        viz.timing_chart_data["Coarse Solver"] = coarse_times
+        viz.timing_chart_data["Fine Solver"] = fine_times
+        viz.timing_chart_data["Communication"] = comm_times
+        viz.timing_chart_labels = ["Total Time"]
+    end
+    
+    # Scaling plot data
+    if !isempty(scaling.strong_scaling_processes)
+        strong_scaling_points = [(scaling.strong_scaling_processes[i], scaling.strong_scaling_speedups[i]) 
+                                for i in 1:length(scaling.strong_scaling_processes)]
+        viz.scaling_plot_data["Strong Scaling Speedup"] = strong_scaling_points
+        
+        efficiency_points = [(scaling.strong_scaling_processes[i], scaling.strong_scaling_efficiencies[i]) 
+                            for i in 1:length(scaling.strong_scaling_processes)]
+        viz.scaling_plot_data["Strong Scaling Efficiency"] = efficiency_points
+    end
+    
+    if !isempty(scaling.weak_scaling_processes)
+        weak_scaling_points = [(scaling.weak_scaling_processes[i], scaling.weak_scaling_efficiencies[i]) 
+                              for i in 1:length(scaling.weak_scaling_processes)]
+        viz.scaling_plot_data["Weak Scaling Efficiency"] = weak_scaling_points
+    end
+    
+    # Create efficiency heatmap (placeholder - would need more detailed data)
+    if !isempty(scaling.strong_scaling_processes) && length(scaling.strong_scaling_processes) >= 2
+        n_processes = length(scaling.strong_scaling_processes)
+        viz.efficiency_heatmap = reshape(scaling.strong_scaling_efficiencies, 1, n_processes)
+        viz.heatmap_x_labels = [string(p) for p in scaling.strong_scaling_processes]
+        viz.heatmap_y_labels = ["Efficiency"]
+    end
+    
+    return nothing
+end
+
+"""
+Export performance data to various formats
+"""
+function export_performance_data(analyzer::PerformanceAnalyzer{T}, 
+                                filename::String = "performance_data") where {T <: AbstractFloat}
+    
+    # Create output directory if it doesn't exist
+    if !isdir(analyzer.output_directory)
+        mkpath(analyzer.output_directory)
+    end
+    
+    if analyzer.report_format == :json
+        export_json_data(analyzer, filename)
+    elseif analyzer.report_format == :html
+        export_html_report(analyzer, filename)
+    else  # :text
+        export_text_report(analyzer, filename)
+    end
+    
+    return nothing
+end
+
+"""
+Export performance data as JSON
+"""
+function export_json_data(analyzer::PerformanceAnalyzer{T}, filename::String) where {T <: AbstractFloat}
+    # This would require a JSON package - placeholder implementation
+    filepath = joinpath(analyzer.output_directory, filename * ".json")
+    
+    # Create a dictionary with all performance data
+    data = Dict(
+        "timing_breakdown" => Dict(
+            "coarse_solver" => analyzer.timing_breakdown.coarse_solver_breakdown,
+            "fine_solver" => analyzer.timing_breakdown.fine_solver_breakdown,
+            "mpi_communication" => analyzer.timing_breakdown.mpi_communication_breakdown,
+            "threading" => analyzer.timing_breakdown.threading_breakdown
+        ),
+        "scaling_analysis" => Dict(
+            "strong_scaling" => Dict(
+                "processes" => analyzer.scaling_analysis.strong_scaling_processes,
+                "times" => analyzer.scaling_analysis.strong_scaling_times,
+                "speedups" => analyzer.scaling_analysis.strong_scaling_speedups,
+                "efficiencies" => analyzer.scaling_analysis.strong_scaling_efficiencies
+            ),
+            "weak_scaling" => Dict(
+                "processes" => analyzer.scaling_analysis.weak_scaling_processes,
+                "problem_sizes" => analyzer.scaling_analysis.weak_scaling_problem_sizes,
+                "times" => analyzer.scaling_analysis.weak_scaling_times,
+                "efficiencies" => analyzer.scaling_analysis.weak_scaling_efficiencies
+            ),
+            "amdahl_parameters" => Dict(
+                "serial_fraction" => analyzer.scaling_analysis.amdahl_serial_fraction,
+                "parallel_fraction" => analyzer.scaling_analysis.amdahl_parallel_fraction
+            )
+        )
+    )
+    
+    # Write to file (simplified - would use JSON.jl in practice)
+    open(filepath, "w") do io
+        println(io, "# Performance Analysis Data (JSON format)")
+        println(io, "# Generated on: $(now())")
+        println(io, data)
+    end
+    
+    println("Performance data exported to: $filepath")
+    return filepath
+end
+
+"""
+Export performance report as HTML
+"""
+function export_html_report(analyzer::PerformanceAnalyzer{T}, filename::String) where {T <: AbstractFloat}
+    filepath = joinpath(analyzer.output_directory, filename * ".html")
+    
+    timing_report = generate_detailed_timing_report(analyzer)
+    scaling_report = generate_scaling_analysis_report(analyzer)
+    
+    html_content = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Parareal Performance Analysis Report</title>
+        <style>
+            body { font-family: monospace; margin: 20px; }
+            .report-section { margin-bottom: 30px; }
+            pre { background-color: #f5f5f5; padding: 15px; border-radius: 5px; }
+        </style>
+    </head>
+    <body>
+        <h1>Parareal Performance Analysis Report</h1>
+        <p>Generated on: $(now())</p>
+        
+        <div class="report-section">
+            <h2>Timing Breakdown Analysis</h2>
+            <pre>$timing_report</pre>
+        </div>
+        
+        <div class="report-section">
+            <h2>Scaling Performance Analysis</h2>
+            <pre>$scaling_report</pre>
+        </div>
+    </body>
+    </html>
+    """
+    
+    open(filepath, "w") do io
+        write(io, html_content)
+    end
+    
+    println("HTML report exported to: $filepath")
+    return filepath
+end
+
+"""
+Export performance report as text
+"""
+function export_text_report(analyzer::PerformanceAnalyzer{T}, filename::String) where {T <: AbstractFloat}
+    filepath = joinpath(analyzer.output_directory, filename * ".txt")
+    
+    timing_report = generate_detailed_timing_report(analyzer)
+    scaling_report = generate_scaling_analysis_report(analyzer)
+    
+    open(filepath, "w") do io
+        println(io, "PARAREAL PERFORMANCE ANALYSIS REPORT")
+        println(io, "Generated on: $(now())")
+        println(io, "")
+        println(io, timing_report)
+        println(io, "")
+        println(io, scaling_report)
+    end
+    
+    println("Text report exported to: $filepath")
+    return filepath
+end
+
+"""
+Print timing breakdown to console
+"""
+function print_timing_breakdown(analyzer::PerformanceAnalyzer{T}) where {T <: AbstractFloat}
+    report = generate_detailed_timing_report(analyzer)
+    println(report)
+    return nothing
+end
+
+"""
+Print scaling analysis to console
+"""
+function print_scaling_analysis(analyzer::PerformanceAnalyzer{T}) where {T <: AbstractFloat}
+    report = generate_scaling_analysis_report(analyzer)
+    println(report)
+    return nothing
+end
+
+"""
+Export performance data to CSV format
+Requirements 10.4: Output detailed timing breakdown for analysis
+"""
+function export_performance_data_csv(analyzer::PerformanceAnalyzer{T}, filename::String) where {T <: AbstractFloat}
+    
+    # Create CSV content
+    csv_lines = String[]
+    
+    # Header
+    push!(csv_lines, "# Parareal Performance Analysis Data Export")
+    push!(csv_lines, "# Generated: $(now())")
+    push!(csv_lines, "")
+    
+    # Timing breakdown data
+    push!(csv_lines, "# Timing Breakdown")
+    push!(csv_lines, "Component,Category,Metric,Value,Unit")
+    
+    breakdown = analyzer.timing_breakdown
+    
+    # Coarse solver data
+    for (key, value) in breakdown.coarse_solver_breakdown
+        unit = key == "total_calls" ? "count" : "seconds"
+        push!(csv_lines, "CoarseSolver,Timing,$key,$value,$unit")
+    end
+    
+    # Fine solver data
+    for (key, value) in breakdown.fine_solver_breakdown
+        unit = key == "total_calls" ? "count" : "seconds"
+        push!(csv_lines, "FineSolver,Timing,$key,$value,$unit")
+    end
+    
+    # MPI communication data
+    for (key, value) in breakdown.mpi_communication_breakdown
+        push!(csv_lines, "MPICommunication,Timing,$key,$value,seconds")
+    end
+    
+    # Threading data
+    for (key, value) in breakdown.threading_breakdown
+        unit = occursin("efficiency", key) || occursin("fraction", key) ? "ratio" : "seconds"
+        push!(csv_lines, "Threading,Performance,$key,$value,$unit")
+    end
+    
+    # Overhead data
+    push!(csv_lines, "Overhead,Analysis,synchronization_overhead,$(breakdown.synchronization_overhead),ratio")
+    push!(csv_lines, "Overhead,Analysis,load_imbalance_overhead,$(breakdown.load_imbalance_overhead),ratio")
+    push!(csv_lines, "Overhead,Analysis,memory_overhead,$(breakdown.memory_overhead),ratio")
+    
+    push!(csv_lines, "")
+    
+    # Scaling analysis data
+    if analyzer.enable_scaling_analysis
+        push!(csv_lines, "# Strong Scaling Data")
+        push!(csv_lines, "Processes,ExecutionTime,Speedup,Efficiency")
+        
+        scaling = analyzer.scaling_analysis
+        for i in 1:length(scaling.strong_scaling_processes)
+            processes = scaling.strong_scaling_processes[i]
+            time = scaling.strong_scaling_times[i]
+            speedup = scaling.strong_scaling_speedups[i]
+            efficiency = scaling.strong_scaling_efficiencies[i]
+            push!(csv_lines, "$processes,$time,$speedup,$efficiency")
+        end
+        
+        push!(csv_lines, "")
+        push!(csv_lines, "# Weak Scaling Data")
+        push!(csv_lines, "Processes,ProblemSize,ExecutionTime,Efficiency,Throughput")
+        
+        for i in 1:length(scaling.weak_scaling_processes)
+            processes = scaling.weak_scaling_processes[i]
+            problem_size = scaling.weak_scaling_problem_sizes[i]
+            time = scaling.weak_scaling_times[i]
+            efficiency = scaling.weak_scaling_efficiencies[i]
+            throughput = scaling.weak_scaling_throughputs[i]
+            push!(csv_lines, "$processes,$problem_size,$time,$efficiency,$throughput")
+        end
+    end
+    
+    # Write to file
+    open(filename, "w") do file
+        for line in csv_lines
+            println(file, line)
+        end
+    end
+    
+    println("Performance data exported to: $filename")
+    return nothing
+end
+
+"""
+Generate performance comparison report between multiple runs
+Requirements 10.5: Report strong and weak scaling metrics for comparison
+"""
+function generate_performance_comparison_report(analyzers::Vector{PerformanceAnalyzer{T}}, 
+                                               run_names::Vector{String}) where {T <: AbstractFloat}
+    
+    if length(analyzers) != length(run_names)
+        error("Number of analyzers must match number of run names")
+    end
+    
+    report = String[]
+    
+    push!(report, "=" ^ 80)
+    push!(report, "PERFORMANCE COMPARISON REPORT")
+    push!(report, "=" ^ 80)
+    push!(report, "")
+    
+    # Summary table
+    push!(report, "Performance Summary Comparison:")
+    push!(report, "-" ^ 60)
+    push!(report, "$(rpad("Run Name", 20)) $(lpad("Total Time", 12)) $(lpad("Speedup", 12)) $(lpad("Efficiency", 12)) $(lpad("Overhead", 12))")
+    push!(report, "-" ^ 60)
+    
+    for (i, analyzer) in enumerate(analyzers)
+        run_name = run_names[i]
+        breakdown = analyzer.timing_breakdown
+        
+        # Calculate summary metrics
+        total_time = sum(values(breakdown.coarse_solver_breakdown)) + 
+                    sum(values(breakdown.fine_solver_breakdown))
+        
+        # Get best speedup from scaling analysis
+        best_speedup = T(1.0)
+        best_efficiency = T(1.0)
+        if analyzer.enable_scaling_analysis && !isempty(analyzer.scaling_analysis.strong_scaling_speedups)
+            best_speedup = maximum(analyzer.scaling_analysis.strong_scaling_speedups)
+            best_efficiency = maximum(analyzer.scaling_analysis.strong_scaling_efficiencies)
+        end
+        
+        total_overhead = breakdown.synchronization_overhead + 
+                        breakdown.load_imbalance_overhead + 
+                        breakdown.memory_overhead
+        
+        push!(report, "$(rpad(run_name, 20)) $(lpad(string(round(total_time, digits=4)), 12)) $(lpad(string(round(best_speedup, digits=2)), 12)) $(lpad(string(round(best_efficiency * 100, digits=2)) * "%", 12)) $(lpad(string(round(total_overhead * 100, digits=2)) * "%", 12))")
+    end
+    
+    push!(report, "")
+    
+    # Detailed comparison by component
+    push!(report, "Component-wise Performance Comparison:")
+    push!(report, "-" ^ 80)
+    
+    components = ["CoarseSolver", "FineSolver", "MPICommunication", "Threading"]
+    
+    for component in components
+        push!(report, "")
+        push!(report, "$component Performance:")
+        push!(report, "-" ^ 40)
+        push!(report, "$(rpad("Run Name", 20)) $(lpad("Total Time", 15)) $(lpad("Avg Time/Call", 15)) $(lpad("Efficiency", 15))")
+        push!(report, "-" ^ 40)
+        
+        for (i, analyzer) in enumerate(analyzers)
+            run_name = run_names[i]
+            breakdown = analyzer.timing_breakdown
+            
+            if component == "CoarseSolver"
+                data = breakdown.coarse_solver_breakdown
+            elseif component == "FineSolver"
+                data = breakdown.fine_solver_breakdown
+            elseif component == "MPICommunication"
+                data = breakdown.mpi_communication_breakdown
+            else # Threading
+                data = breakdown.threading_breakdown
+            end
+            
+            total_time = get(data, "total_time", T(0.0))
+            calls = get(data, "total_calls", T(1.0))
+            avg_time = calls > 0 ? total_time / calls : T(0.0)
+            efficiency = get(data, "efficiency", T(1.0))
+            
+            push!(report, "$(rpad(run_name, 20)) $(lpad(string(round(total_time, digits=6)), 15)) $(lpad(string(round(avg_time, digits=6)), 15)) $(lpad(string(round(efficiency * 100, digits=2)) * "%", 15))")
+        end
+    end
+    
+    push!(report, "")
+    
+    # Scaling comparison
+    if all(analyzer -> analyzer.enable_scaling_analysis, analyzers)
+        push!(report, "Scaling Performance Comparison:")
+        push!(report, "-" ^ 60)
+        
+        # Find common process counts
+        all_processes = Set{Int}()
+        for analyzer in analyzers
+            union!(all_processes, analyzer.scaling_analysis.strong_scaling_processes)
+        end
+        common_processes = sort(collect(all_processes))
+        
+        if !isempty(common_processes)
+            push!(report, "Strong Scaling Speedup Comparison:")
+            push!(report, "$(rpad("Processes", 12)) $(join([rpad(name, 12) for name in run_names], " "))")
+            push!(report, "-" ^ (12 + length(run_names) * 13))
+            
+            for proc_count in common_processes
+                speedups = String[]
+                for analyzer in analyzers
+                    scaling = analyzer.scaling_analysis
+                    idx = findfirst(p -> p == proc_count, scaling.strong_scaling_processes)
+                    if idx !== nothing
+                        speedup = scaling.strong_scaling_speedups[idx]
+                        push!(speedups, lpad(string(round(speedup, digits=2)), 12))
+                    else
+                        push!(speedups, lpad("N/A", 12))
+                    end
+                end
+                push!(report, "$(rpad(string(proc_count), 12)) $(join(speedups, " "))")
+            end
+        end
+    end
+    
+    push!(report, "")
+    push!(report, "=" ^ 80)
+    
+    return join(report, "\n")
+end
+
+"""
+Create performance visualization plots (ASCII-based for terminal output)
+Requirements 10.4, 10.5: Create performance visualization utilities
+"""
+function create_ascii_performance_plots(analyzer::PerformanceAnalyzer{T}) where {T <: AbstractFloat}
+    
+    plots = String[]
+    
+    # Timing breakdown pie chart (ASCII)
+    push!(plots, "TIMING BREAKDOWN VISUALIZATION")
+    push!(plots, "=" ^ 50)
+    
+    breakdown = analyzer.timing_breakdown
+    
+    # Calculate total times for each component
+    coarse_total = sum(values(breakdown.coarse_solver_breakdown))
+    fine_total = sum(values(breakdown.fine_solver_breakdown))
+    mpi_total = sum(values(breakdown.mpi_communication_breakdown))
+    threading_total = sum(values(breakdown.threading_breakdown))
+    
+    total_time = coarse_total + fine_total + mpi_total + threading_total
+    
+    if total_time > 0
+        # Create ASCII bar chart
+        push!(plots, "")
+        push!(plots, "Component Time Distribution:")
+        push!(plots, "-" ^ 40)
+        
+        components = [
+            ("Coarse Solver", coarse_total),
+            ("Fine Solver", fine_total),
+            ("MPI Communication", mpi_total),
+            ("Threading", threading_total)
+        ]
+        
+        max_bar_length = 30
+        for (name, time) in components
+            percentage = time / total_time * 100
+            bar_length = Int(round(percentage / 100 * max_bar_length))
+            bar = "█" ^ bar_length * "░" ^ (max_bar_length - bar_length)
+            push!(plots, "$(rpad(name, 18)) |$bar| $(lpad(string(round(percentage, digits=2)), 6))% ($(lpad(string(round(time, digits=4)), 8))s)")
+        end
+    end
+    
+    push!(plots, "")
+    
+    # Strong scaling plot (ASCII)
+    if analyzer.enable_scaling_analysis
+        scaling = analyzer.scaling_analysis
+        
+        if !isempty(scaling.strong_scaling_processes)
+            push!(plots, "STRONG SCALING VISUALIZATION")
+            push!(plots, "=" ^ 50)
+            push!(plots, "")
+            push!(plots, "Speedup vs Number of Processes:")
+            push!(plots, "-" ^ 40)
+            
+            max_speedup = maximum(scaling.strong_scaling_speedups)
+            max_processes = maximum(scaling.strong_scaling_processes)
+            
+            # Create ASCII line plot
+            plot_height = 15
+            plot_width = 50
+            
+            # Plot header
+            push!(plots, "$(rpad("Speedup", 8)) │")
+            
+            for row in plot_height:-1:1
+                speedup_level = (row / plot_height) * max_speedup
+                line = "$(lpad(string(round(speedup_level, digits=1)), 8)) │"
+                
+                for col in 1:plot_width
+                    proc_level = (col / plot_width) * max_processes
+                    
+                    # Find closest data point
+                    closest_point = false
+                    for i in 1:length(scaling.strong_scaling_processes)
+                        proc = scaling.strong_scaling_processes[i]
+                        speedup = scaling.strong_scaling_speedups[i]
+                        
+                        if abs(proc - proc_level) < max_processes / plot_width &&
+                           abs(speedup - speedup_level) < max_speedup / plot_height
+                            closest_point = true
+                            break
+                        end
+                    end
+                    
+                    if closest_point
+                        line *= "●"
+                    elseif abs(speedup_level - proc_level * max_speedup / max_processes) < max_speedup / plot_height
+                        line *= "─"  # Ideal scaling line
+                    else
+                        line *= " "
+                    end
+                end
+                
+                push!(plots, line)
+            end
+            
+            # Plot footer
+            push!(plots, "$(repeat(" ", 8)) └$(repeat("─", plot_width))")
+            push!(plots, "$(repeat(" ", 8)) $(lpad("0", 8))$(repeat(" ", plot_width - 16))$(lpad(string(Int(max_processes)), 8))")
+            push!(plots, "$(repeat(" ", 8)) Number of Processes")
+            
+            push!(plots, "")
+            push!(plots, "Legend: ● = Actual data points, ─ = Ideal scaling")
+        end
+    end
+    
+    return join(plots, "\n")
+end
+
+"""
+Generate comprehensive performance analysis report with all features
+Requirements 10.4, 10.5: Complete performance analysis and reporting
+"""
+function generate_comprehensive_performance_report(analyzer::PerformanceAnalyzer{T}) where {T <: AbstractFloat}
+    
+    report_sections = String[]
+    
+    # Header
+    push!(report_sections, "=" ^ 100)
+    push!(report_sections, "COMPREHENSIVE PARAREAL PERFORMANCE ANALYSIS REPORT")
+    push!(report_sections, "Generated: $(now())")
+    push!(report_sections, "=" ^ 100)
+    push!(report_sections, "")
+    
+    # 1. Detailed timing breakdown
+    if analyzer.enable_detailed_timing
+        push!(report_sections, generate_detailed_timing_report(analyzer))
+        push!(report_sections, "")
+    end
+    
+    # 2. Scaling analysis
+    if analyzer.enable_scaling_analysis
+        push!(report_sections, generate_scaling_analysis_report(analyzer))
+        push!(report_sections, "")
+    end
+    
+    # 3. ASCII visualizations
+    if analyzer.enable_visualization
+        push!(report_sections, create_ascii_performance_plots(analyzer))
+        push!(report_sections, "")
+    end
+    
+    # 4. Performance recommendations
+    push!(report_sections, "PERFORMANCE OPTIMIZATION RECOMMENDATIONS")
+    push!(report_sections, "=" ^ 60)
+    push!(report_sections, "")
+    
+    recommendations = generate_performance_recommendations(analyzer)
+    push!(report_sections, recommendations)
+    
+    push!(report_sections, "")
+    push!(report_sections, "=" ^ 100)
+    push!(report_sections, "END OF REPORT")
+    push!(report_sections, "=" ^ 100)
+    
+    return join(report_sections, "\n")
+end
+
+"""
+Generate performance optimization recommendations based on analysis
+"""
+function generate_performance_recommendations(analyzer::PerformanceAnalyzer{T}) where {T <: AbstractFloat}
+    
+    recommendations = String[]
+    breakdown = analyzer.timing_breakdown
+    
+    # Analyze timing breakdown for recommendations
+    coarse_total = sum(values(breakdown.coarse_solver_breakdown))
+    fine_total = sum(values(breakdown.fine_solver_breakdown))
+    mpi_total = sum(values(breakdown.mpi_communication_breakdown))
+    
+    total_computation = coarse_total + fine_total
+    total_time = total_computation + mpi_total
+    
+    if total_time > 0
+        mpi_ratio = mpi_total / total_time
+        
+        # Communication overhead recommendations
+        if mpi_ratio > 0.2
+            push!(recommendations, "⚠️  HIGH COMMUNICATION OVERHEAD DETECTED ($(round(mpi_ratio * 100, digits=1))%)")
+            push!(recommendations, "   Recommendations:")
+            push!(recommendations, "   - Consider reducing the number of time windows")
+            push!(recommendations, "   - Optimize MPI message sizes")
+            push!(recommendations, "   - Use non-blocking communication where possible")
+            push!(recommendations, "")
+        end
+        
+        # Load balancing recommendations
+        if breakdown.load_imbalance_overhead > 0.15
+            push!(recommendations, "⚠️  LOAD IMBALANCE DETECTED ($(round(breakdown.load_imbalance_overhead * 100, digits=1))%)")
+            push!(recommendations, "   Recommendations:")
+            push!(recommendations, "   - Redistribute time windows more evenly")
+            push!(recommendations, "   - Consider dynamic load balancing")
+            push!(recommendations, "   - Check for heterogeneous hardware performance")
+            push!(recommendations, "")
+        end
+        
+        # Scaling efficiency recommendations
+        if analyzer.enable_scaling_analysis
+            scaling = analyzer.scaling_analysis
+            if !isempty(scaling.strong_scaling_efficiencies)
+                min_efficiency = minimum(scaling.strong_scaling_efficiencies)
+                if min_efficiency < 0.7
+                    push!(recommendations, "⚠️  POOR SCALING EFFICIENCY DETECTED ($(round(min_efficiency * 100, digits=1))%)")
+                    push!(recommendations, "   Recommendations:")
+                    push!(recommendations, "   - Reduce the number of MPI processes")
+                    push!(recommendations, "   - Increase problem size per process")
+                    push!(recommendations, "   - Optimize coarse/fine solver ratio")
+                    push!(recommendations, "")
+                end
+            end
+        end
+        
+        # Solver balance recommendations
+        coarse_fine_ratio = coarse_total > 0 ? fine_total / coarse_total : T(Inf)
+        if coarse_fine_ratio < 5.0
+            push!(recommendations, "ℹ️  COARSE SOLVER MAY BE TOO EXPENSIVE")
+            push!(recommendations, "   Recommendations:")
+            push!(recommendations, "   - Reduce coarse solver accuracy")
+            push!(recommendations, "   - Increase coarse time step size")
+            push!(recommendations, "   - Simplify coarse physics model")
+            push!(recommendations, "")
+        elseif coarse_fine_ratio > 50.0
+            push!(recommendations, "ℹ️  FINE SOLVER MAY BE TOO EXPENSIVE")
+            push!(recommendations, "   Recommendations:")
+            push!(recommendations, "   - Optimize fine solver convergence criteria")
+            push!(recommendations, "   - Consider more efficient fine solver algorithms")
+            push!(recommendations, "   - Reduce fine solver time step if possible")
+            push!(recommendations, "")
+        end
+    end
+    
+    if isempty(recommendations)
+        push!(recommendations, "✅ PERFORMANCE LOOKS GOOD!")
+        push!(recommendations, "   No major performance issues detected.")
+        push!(recommendations, "   Continue monitoring for optimal performance.")
+    end
+    
+    return join(recommendations, "\n")
+end
+
+
+
 end # module Parareal
