@@ -839,6 +839,11 @@ export PerformanceMetrics, TimingData, CommunicationMetrics, EfficiencyMetrics
 export create_performance_metrics, update_timing_data!, record_communication_overhead!
 export calculate_efficiency_metrics!, get_performance_summary
 export reset_performance_metrics!, merge_performance_metrics
+# Performance monitoring system exports
+export PerformanceMonitor, LoadBalanceAnalyzer, ScalabilityAnalyzer
+export create_performance_monitor, start_monitoring!, stop_monitoring!
+export analyze_load_balance!, calculate_scalability_metrics!
+export get_real_time_metrics, generate_monitoring_report
 
 """
 Parareal iteration result structure (forward declaration)
@@ -948,6 +953,11 @@ function run_parareal!(manager::PararealManager{T},
     # Initialize convergence monitor
     monitor = ConvergenceMonitor{T}(manager.config.convergence_tolerance, manager.config.max_iterations)
     
+    # Initialize performance monitoring system
+    perf_monitor = create_performance_monitor(manager.mpi_comm, T(0.5))  # 0.5 second monitoring interval
+    integrate_monitoring!(manager, perf_monitor)
+    start_monitoring!(perf_monitor)
+    
     # Create solver configuration
     coarse_solver = CoarseSolver{T}(
         dt = manager.config.dt_coarse,
@@ -989,7 +999,7 @@ function run_parareal!(manager::PararealManager{T},
         # Run Parareal iterations
         result = run_parareal_iterations!(
             manager, monitor, coarse_solver, fine_solver, 
-            window_solutions, local_windows, problem_data, coordinator
+            window_solutions, local_windows, problem_data, coordinator, perf_monitor
         )
         
         total_time = time_ns() / 1e9 - total_start_time
@@ -1004,14 +1014,45 @@ function run_parareal!(manager::PararealManager{T},
             # Calculate efficiency metrics
             calculate_efficiency_metrics!(manager.performance_metrics)
             
-            if rank == 0
-                println("Parareal computation completed:")
-                println("  Converged: $(result.converged)")
-                println("  Iterations: $(result.iterations)")
-                println("  Final residual: $(length(result.residual_history) > 0 ? result.residual_history[end] : "N/A")")
-                println("  Total time: $(total_time) seconds")
-                println()
-                print_performance_report(manager.performance_metrics)
+            # Stop performance monitoring and perform analysis
+            if perf_monitor !== nothing
+                stop_monitoring!(perf_monitor)
+                
+                # Gather performance metrics from all processes for load balance analysis
+                all_metrics = Vector{Any}()
+                if mpi_size > 1
+                    # In a real implementation, this would gather metrics from all processes
+                    # For now, we'll use the local metrics
+                    push!(all_metrics, manager.performance_metrics)
+                    
+                    # Perform load balance analysis
+                    analyze_load_balance!(perf_monitor, all_metrics)
+                    
+                    # Calculate scalability metrics
+                    calculate_scalability_metrics!(perf_monitor, mpi_size, T(total_time))
+                end
+                
+                if rank == 0
+                    println("Parareal computation completed:")
+                    println("  Converged: $(result.converged)")
+                    println("  Iterations: $(result.iterations)")
+                    println("  Final residual: $(length(result.residual_history) > 0 ? result.residual_history[end] : "N/A")")
+                    println("  Total time: $(total_time) seconds")
+                    println()
+                    print_performance_report(manager.performance_metrics)
+                    println()
+                    println(generate_monitoring_report(perf_monitor))
+                end
+            else
+                if rank == 0
+                    println("Parareal computation completed:")
+                    println("  Converged: $(result.converged)")
+                    println("  Iterations: $(result.iterations)")
+                    println("  Final residual: $(length(result.residual_history) > 0 ? result.residual_history[end] : "N/A")")
+                    println("  Total time: $(total_time) seconds")
+                    println()
+                    print_performance_report(manager.performance_metrics)
+                end
             end
         else
             if rank == 0
@@ -1109,7 +1150,8 @@ function run_parareal_iterations!(manager::PararealManager{T},
                                  window_solutions::Vector{Array{T,3}},
                                  local_windows::Vector{TimeWindow{T}},
                                  problem_data::Heat3dsProblemData{T},
-                                 coordinator::HybridCoordinator{T}) where {T <: AbstractFloat}
+                                 coordinator::HybridCoordinator{T},
+                                 perf_monitor::Union{Any, Nothing} = nothing) where {T <: AbstractFloat}
     
     rank = manager.mpi_comm.rank
     mpi_size = manager.mpi_comm.size
@@ -1146,6 +1188,7 @@ function run_parareal_iterations!(manager::PararealManager{T},
     
     while !monitor.is_converged
         iteration_num = monitor.iteration_count + 1
+        iteration_start = time_ns() / 1e9
         
         if rank == 0
             println("Parareal iteration $iteration_num")
@@ -1199,6 +1242,18 @@ function run_parareal_iterations!(manager::PararealManager{T},
         # Broadcast convergence status to ensure all processes agree
         converged = broadcast_convergence_status!(manager.mpi_comm, converged)
         monitor.is_converged = converged
+        
+        # Update performance monitoring
+        if perf_monitor !== nothing
+            iteration_time = time_ns() / 1e9 - iteration_start
+            memory_usage = T(0.0)  # Would be implemented with actual memory monitoring
+            update_monitoring_data!(perf_monitor, iteration_num, global_residual, memory_usage)
+            
+            # Print real-time status every few iterations
+            if rank == 0 && iteration_num % 5 == 0
+                print_monitoring_status(perf_monitor)
+            end
+        end
         
         if converged
             break
@@ -3508,6 +3563,546 @@ function measure_and_record!(metrics::Any,
     end
     
     return result
+end
+
+# ===== Performance Monitoring System Implementation =====
+
+"""
+Real-time performance monitoring data
+"""
+mutable struct MonitoringData{T <: AbstractFloat}
+    # Real-time metrics
+    current_iteration::Int
+    current_wall_time::T
+    current_memory_usage::T
+    
+    # Historical data
+    iteration_times::Vector{T}
+    memory_usage_history::Vector{T}
+    residual_history::Vector{T}
+    
+    # Load balancing metrics
+    process_workloads::Vector{T}
+    process_idle_times::Vector{T}
+    communication_patterns::Dict{Tuple{Int,Int}, T}
+    
+    # Scalability data
+    strong_scaling_data::Dict{Int, T}  # n_processes => execution_time
+    weak_scaling_data::Dict{Int, T}    # problem_size => execution_time
+    
+    function MonitoringData{T}() where {T <: AbstractFloat}
+        return new{T}(
+            0, T(0.0), T(0.0),
+            Vector{T}(), Vector{T}(), Vector{T}(),
+            Vector{T}(), Vector{T}(), Dict{Tuple{Int,Int}, T}(),
+            Dict{Int, T}(), Dict{Int, T}()
+        )
+    end
+end
+
+"""
+Load balance analyzer for MPI processes
+"""
+mutable struct LoadBalanceAnalyzer{T <: AbstractFloat}
+    process_metrics::Vector{PerformanceMetrics{T}}
+    load_balance_threshold::T
+    imbalance_factor::T
+    bottleneck_processes::Vector{Int}
+    
+    function LoadBalanceAnalyzer{T}(n_processes::Int, threshold::T = T(0.1)) where {T <: AbstractFloat}
+        return new{T}(
+            Vector{PerformanceMetrics{T}}(),
+            threshold,
+            T(0.0),
+            Vector{Int}()
+        )
+    end
+end
+
+"""
+Scalability analyzer for strong and weak scaling
+"""
+mutable struct ScalabilityAnalyzer{T <: AbstractFloat}
+    baseline_time::T
+    baseline_processes::Int
+    baseline_problem_size::Int
+    
+    # Strong scaling (fixed problem size, varying processes)
+    strong_scaling_efficiency::Vector{T}
+    strong_scaling_speedup::Vector{T}
+    
+    # Weak scaling (proportional problem size and processes)
+    weak_scaling_efficiency::Vector{T}
+    weak_scaling_throughput::Vector{T}
+    
+    # Amdahl's law parameters
+    serial_fraction::T
+    parallel_fraction::T
+    
+    function ScalabilityAnalyzer{T}() where {T <: AbstractFloat}
+        return new{T}(
+            T(0.0), 0, 0,
+            Vector{T}(), Vector{T}(),
+            Vector{T}(), Vector{T}(),
+            T(0.0), T(0.0)
+        )
+    end
+end
+
+"""
+Comprehensive performance monitoring system
+"""
+mutable struct PerformanceMonitor{T <: AbstractFloat}
+    monitoring_data::MonitoringData{T}
+    load_analyzer::LoadBalanceAnalyzer{T}
+    scalability_analyzer::ScalabilityAnalyzer{T}
+    
+    # Monitoring control
+    is_monitoring::Bool
+    monitoring_interval::T
+    last_update_time::T
+    
+    # MPI communication
+    mpi_comm::Union{MPICommunicator{T}, Nothing}
+    
+    function PerformanceMonitor{T}(mpi_comm::Union{MPICommunicator{T}, Nothing} = nothing,
+                                  monitoring_interval::T = T(1.0)) where {T <: AbstractFloat}
+        n_processes = mpi_comm !== nothing ? mpi_comm.size : 1
+        
+        return new{T}(
+            MonitoringData{T}(),
+            LoadBalanceAnalyzer{T}(n_processes),
+            ScalabilityAnalyzer{T}(),
+            false,
+            monitoring_interval,
+            T(0.0),
+            mpi_comm
+        )
+    end
+end
+
+"""
+Create performance monitor instance
+"""
+function create_performance_monitor(mpi_comm::Union{Any, Nothing} = nothing,
+                                   monitoring_interval::AbstractFloat = 1.0)
+    T = Float64
+    return PerformanceMonitor{T}(mpi_comm, T(monitoring_interval))
+end
+
+"""
+Start real-time performance monitoring
+"""
+function start_monitoring!(monitor::PerformanceMonitor{T}) where {T <: AbstractFloat}
+    if monitor.is_monitoring
+        @warn "Performance monitoring is already active"
+        return nothing
+    end
+    
+    monitor.is_monitoring = true
+    monitor.last_update_time = time_ns() / 1e9
+    
+    # Initialize monitoring data
+    monitor.monitoring_data.current_iteration = 0
+    monitor.monitoring_data.current_wall_time = T(0.0)
+    monitor.monitoring_data.current_memory_usage = T(0.0)
+    
+    # Clear historical data
+    empty!(monitor.monitoring_data.iteration_times)
+    empty!(monitor.monitoring_data.memory_usage_history)
+    empty!(monitor.monitoring_data.residual_history)
+    empty!(monitor.monitoring_data.process_workloads)
+    empty!(monitor.monitoring_data.process_idle_times)
+    empty!(monitor.monitoring_data.communication_patterns)
+    
+    if monitor.mpi_comm !== nothing && monitor.mpi_comm.rank == 0
+        println("=== Performance Monitoring Started ===")
+        println("Monitoring interval: $(monitor.monitoring_interval) seconds")
+        println("MPI processes: $(monitor.mpi_comm.size)")
+        println("=====================================")
+    end
+    
+    return nothing
+end
+
+"""
+Stop performance monitoring
+"""
+function stop_monitoring!(monitor::PerformanceMonitor{T}) where {T <: AbstractFloat}
+    if !monitor.is_monitoring
+        @warn "Performance monitoring is not active"
+        return nothing
+    end
+    
+    monitor.is_monitoring = false
+    
+    if monitor.mpi_comm !== nothing && monitor.mpi_comm.rank == 0
+        println("=== Performance Monitoring Stopped ===")
+        println("Total iterations monitored: $(monitor.monitoring_data.current_iteration)")
+        println("Total monitoring time: $(monitor.monitoring_data.current_wall_time) seconds")
+        println("======================================")
+    end
+    
+    return nothing
+end
+
+"""
+Update real-time monitoring data
+"""
+function update_monitoring_data!(monitor::PerformanceMonitor{T},
+                                iteration::Int,
+                                residual::T,
+                                memory_usage::T = T(0.0)) where {T <: AbstractFloat}
+    
+    if !monitor.is_monitoring
+        return nothing
+    end
+    
+    current_time = time_ns() / 1e9
+    
+    # Update current metrics
+    monitor.monitoring_data.current_iteration = iteration
+    monitor.monitoring_data.current_wall_time = T(current_time - monitor.last_update_time)
+    monitor.monitoring_data.current_memory_usage = memory_usage
+    
+    # Add to historical data
+    push!(monitor.monitoring_data.iteration_times, monitor.monitoring_data.current_wall_time)
+    push!(monitor.monitoring_data.memory_usage_history, memory_usage)
+    push!(monitor.monitoring_data.residual_history, residual)
+    
+    # Update timestamp
+    monitor.last_update_time = current_time
+    
+    return nothing
+end
+
+"""
+Analyze load balance across MPI processes
+"""
+function analyze_load_balance!(monitor::PerformanceMonitor{T},
+                              process_metrics::Vector{Any}) where {T <: AbstractFloat}
+    
+    if isempty(process_metrics)
+        @warn "No process metrics provided for load balance analysis"
+        return nothing
+    end
+    
+    analyzer = monitor.load_analyzer
+    n_processes = length(process_metrics)
+    
+    # Calculate workload for each process
+    workloads = Vector{T}(undef, n_processes)
+    idle_times = Vector{T}(undef, n_processes)
+    
+    for (i, metrics) in enumerate(process_metrics)
+        # Total computation time as workload indicator
+        workloads[i] = metrics.timing_data.total_solver_time
+        
+        # Idle time = wall time - computation time - communication time
+        total_active_time = (metrics.timing_data.total_solver_time + 
+                           metrics.communication_metrics.total_communication_time)
+        idle_times[i] = max(T(0.0), metrics.total_wall_time - total_active_time)
+    end
+    
+    # Store workload data
+    analyzer.process_metrics = process_metrics
+    monitor.monitoring_data.process_workloads = workloads
+    monitor.monitoring_data.process_idle_times = idle_times
+    
+    # Calculate load imbalance factor
+    if !isempty(workloads)
+        max_workload = maximum(workloads)
+        min_workload = minimum(workloads)
+        avg_workload = sum(workloads) / length(workloads)
+        
+        # Imbalance factor: (max - min) / avg
+        analyzer.imbalance_factor = max_workload > 0 ? (max_workload - min_workload) / avg_workload : T(0.0)
+        
+        # Identify bottleneck processes (workload > avg + threshold * avg)
+        threshold_workload = avg_workload * (1 + analyzer.load_balance_threshold)
+        analyzer.bottleneck_processes = [i-1 for (i, workload) in enumerate(workloads) if workload > threshold_workload]
+    end
+    
+    return nothing
+end
+
+"""
+Calculate scalability metrics
+"""
+function calculate_scalability_metrics!(monitor::PerformanceMonitor{T},
+                                      n_processes::Int,
+                                      execution_time::T,
+                                      problem_size::Int = 0) where {T <: AbstractFloat}
+    
+    analyzer = monitor.scalability_analyzer
+    
+    # Set baseline if not already set
+    if analyzer.baseline_time == T(0.0)
+        analyzer.baseline_time = execution_time
+        analyzer.baseline_processes = n_processes
+        analyzer.baseline_problem_size = problem_size
+        return nothing
+    end
+    
+    # Strong scaling analysis (fixed problem size)
+    if problem_size == analyzer.baseline_problem_size || problem_size == 0
+        # Calculate speedup: T_1 / T_p
+        speedup = analyzer.baseline_time / execution_time
+        
+        # Calculate efficiency: speedup / n_processes
+        efficiency = speedup / n_processes
+        
+        # Store strong scaling data
+        monitor.monitoring_data.strong_scaling_data[n_processes] = execution_time
+        push!(analyzer.strong_scaling_speedup, speedup)
+        push!(analyzer.strong_scaling_efficiency, efficiency)
+        
+        # Estimate Amdahl's law parameters
+        if n_processes > 1
+            # S = 1 / (f + (1-f)/p) where f is serial fraction, p is processes
+            # Rearranging: f = (p - S) / (S * (p - 1))
+            if speedup > 0 && speedup < n_processes
+                serial_fraction = (n_processes - speedup) / (speedup * (n_processes - 1))
+                analyzer.serial_fraction = max(T(0.0), min(T(1.0), serial_fraction))
+                analyzer.parallel_fraction = T(1.0) - analyzer.serial_fraction
+            end
+        end
+    end
+    
+    # Weak scaling analysis (proportional problem size and processes)
+    if problem_size > 0 && problem_size != analyzer.baseline_problem_size
+        # Weak scaling efficiency: T_1 / T_p (for proportional problem sizes)
+        baseline_time_per_unit = analyzer.baseline_time / analyzer.baseline_problem_size
+        current_time_per_unit = execution_time / problem_size
+        
+        weak_efficiency = baseline_time_per_unit / current_time_per_unit
+        throughput = problem_size / execution_time
+        
+        # Store weak scaling data
+        monitor.monitoring_data.weak_scaling_data[problem_size] = execution_time
+        push!(analyzer.weak_scaling_efficiency, weak_efficiency)
+        push!(analyzer.weak_scaling_throughput, throughput)
+    end
+    
+    return nothing
+end
+
+"""
+Get current real-time metrics
+"""
+function get_real_time_metrics(monitor::PerformanceMonitor{T}) where {T <: AbstractFloat}
+    metrics = Dict{String, Any}()
+    
+    # Current status
+    metrics["is_monitoring"] = monitor.is_monitoring
+    metrics["current_iteration"] = monitor.monitoring_data.current_iteration
+    metrics["current_wall_time"] = monitor.monitoring_data.current_wall_time
+    metrics["current_memory_usage"] = monitor.monitoring_data.current_memory_usage
+    
+    # Historical data
+    metrics["iteration_count"] = length(monitor.monitoring_data.iteration_times)
+    metrics["total_iterations"] = monitor.monitoring_data.current_iteration
+    
+    if !isempty(monitor.monitoring_data.iteration_times)
+        metrics["average_iteration_time"] = sum(monitor.monitoring_data.iteration_times) / length(monitor.monitoring_data.iteration_times)
+        metrics["max_iteration_time"] = maximum(monitor.monitoring_data.iteration_times)
+        metrics["min_iteration_time"] = minimum(monitor.monitoring_data.iteration_times)
+    end
+    
+    if !isempty(monitor.monitoring_data.memory_usage_history)
+        metrics["peak_memory_usage"] = maximum(monitor.monitoring_data.memory_usage_history)
+        metrics["average_memory_usage"] = sum(monitor.monitoring_data.memory_usage_history) / length(monitor.monitoring_data.memory_usage_history)
+    end
+    
+    if !isempty(monitor.monitoring_data.residual_history)
+        metrics["current_residual"] = monitor.monitoring_data.residual_history[end]
+        metrics["initial_residual"] = monitor.monitoring_data.residual_history[1]
+        metrics["residual_reduction"] = monitor.monitoring_data.residual_history[1] / monitor.monitoring_data.residual_history[end]
+    end
+    
+    # Load balance metrics
+    if !isempty(monitor.monitoring_data.process_workloads)
+        metrics["load_imbalance_factor"] = monitor.load_analyzer.imbalance_factor
+        metrics["bottleneck_processes"] = monitor.load_analyzer.bottleneck_processes
+        metrics["max_workload"] = maximum(monitor.monitoring_data.process_workloads)
+        metrics["min_workload"] = minimum(monitor.monitoring_data.process_workloads)
+        metrics["average_workload"] = sum(monitor.monitoring_data.process_workloads) / length(monitor.monitoring_data.process_workloads)
+    end
+    
+    # Scalability metrics
+    if !isempty(monitor.scalability_analyzer.strong_scaling_speedup)
+        metrics["current_speedup"] = monitor.scalability_analyzer.strong_scaling_speedup[end]
+        metrics["current_efficiency"] = monitor.scalability_analyzer.strong_scaling_efficiency[end]
+        metrics["serial_fraction"] = monitor.scalability_analyzer.serial_fraction
+        metrics["parallel_fraction"] = monitor.scalability_analyzer.parallel_fraction
+    end
+    
+    return metrics
+end
+
+"""
+Generate comprehensive monitoring report
+"""
+function generate_monitoring_report(monitor::PerformanceMonitor{T}) where {T <: AbstractFloat}
+    report = String[]
+    
+    push!(report, "=== Performance Monitoring Report ===")
+    push!(report, "Generated: $(Dates.format(now(), "yyyy-mm-dd HH:MM:SS"))")
+    push!(report, "")
+    
+    # Monitoring summary
+    push!(report, "Monitoring Summary:")
+    push!(report, "  Status: $(monitor.is_monitoring ? "Active" : "Stopped")")
+    push!(report, "  Total iterations: $(monitor.monitoring_data.current_iteration)")
+    push!(report, "  Monitoring interval: $(monitor.monitoring_interval) seconds")
+    
+    if monitor.mpi_comm !== nothing
+        push!(report, "  MPI processes: $(monitor.mpi_comm.size)")
+    end
+    push!(report, "")
+    
+    # Performance metrics
+    if !isempty(monitor.monitoring_data.iteration_times)
+        avg_time = sum(monitor.monitoring_data.iteration_times) / length(monitor.monitoring_data.iteration_times)
+        max_time = maximum(monitor.monitoring_data.iteration_times)
+        min_time = minimum(monitor.monitoring_data.iteration_times)
+        
+        push!(report, "Iteration Timing:")
+        push!(report, "  Average time: $(round(avg_time, digits=4)) seconds")
+        push!(report, "  Maximum time: $(round(max_time, digits=4)) seconds")
+        push!(report, "  Minimum time: $(round(min_time, digits=4)) seconds")
+        push!(report, "")
+    end
+    
+    # Memory usage
+    if !isempty(monitor.monitoring_data.memory_usage_history)
+        peak_memory = maximum(monitor.monitoring_data.memory_usage_history)
+        avg_memory = sum(monitor.monitoring_data.memory_usage_history) / length(monitor.monitoring_data.memory_usage_history)
+        
+        push!(report, "Memory Usage:")
+        push!(report, "  Peak usage: $(round(peak_memory, digits=2)) MB")
+        push!(report, "  Average usage: $(round(avg_memory, digits=2)) MB")
+        push!(report, "")
+    end
+    
+    # Convergence analysis
+    if !isempty(monitor.monitoring_data.residual_history)
+        initial_residual = monitor.monitoring_data.residual_history[1]
+        final_residual = monitor.monitoring_data.residual_history[end]
+        reduction_factor = initial_residual / final_residual
+        
+        push!(report, "Convergence Analysis:")
+        push!(report, "  Initial residual: $(initial_residual)")
+        push!(report, "  Final residual: $(final_residual)")
+        push!(report, "  Reduction factor: $(round(reduction_factor, digits=2))")
+        push!(report, "")
+    end
+    
+    # Load balance analysis
+    if !isempty(monitor.monitoring_data.process_workloads)
+        push!(report, "Load Balance Analysis:")
+        push!(report, "  Imbalance factor: $(round(monitor.load_analyzer.imbalance_factor, digits=4))")
+        push!(report, "  Bottleneck processes: $(monitor.load_analyzer.bottleneck_processes)")
+        
+        max_workload = maximum(monitor.monitoring_data.process_workloads)
+        min_workload = minimum(monitor.monitoring_data.process_workloads)
+        avg_workload = sum(monitor.monitoring_data.process_workloads) / length(monitor.monitoring_data.process_workloads)
+        
+        push!(report, "  Max workload: $(round(max_workload, digits=4)) seconds")
+        push!(report, "  Min workload: $(round(min_workload, digits=4)) seconds")
+        push!(report, "  Avg workload: $(round(avg_workload, digits=4)) seconds")
+        push!(report, "")
+    end
+    
+    # Scalability analysis
+    if !isempty(monitor.scalability_analyzer.strong_scaling_speedup)
+        current_speedup = monitor.scalability_analyzer.strong_scaling_speedup[end]
+        current_efficiency = monitor.scalability_analyzer.strong_scaling_efficiency[end]
+        
+        push!(report, "Scalability Analysis:")
+        push!(report, "  Current speedup: $(round(current_speedup, digits=2))x")
+        push!(report, "  Current efficiency: $(round(current_efficiency * 100, digits=1))%")
+        push!(report, "  Serial fraction: $(round(monitor.scalability_analyzer.serial_fraction, digits=4))")
+        push!(report, "  Parallel fraction: $(round(monitor.scalability_analyzer.parallel_fraction, digits=4))")
+        push!(report, "")
+    end
+    
+    # Strong scaling data
+    if !isempty(monitor.monitoring_data.strong_scaling_data)
+        push!(report, "Strong Scaling Data:")
+        for (n_proc, exec_time) in sort(collect(monitor.monitoring_data.strong_scaling_data))
+            speedup = monitor.scalability_analyzer.baseline_time / exec_time
+            efficiency = speedup / n_proc
+            push!(report, "  $n_proc processes: $(round(exec_time, digits=4))s (speedup: $(round(speedup, digits=2))x, efficiency: $(round(efficiency * 100, digits=1))%)")
+        end
+        push!(report, "")
+    end
+    
+    # Weak scaling data
+    if !isempty(monitor.monitoring_data.weak_scaling_data)
+        push!(report, "Weak Scaling Data:")
+        for (prob_size, exec_time) in sort(collect(monitor.monitoring_data.weak_scaling_data))
+            throughput = prob_size / exec_time
+            push!(report, "  Problem size $prob_size: $(round(exec_time, digits=4))s (throughput: $(round(throughput, digits=2)) units/s)")
+        end
+        push!(report, "")
+    end
+    
+    push!(report, "=====================================")
+    
+    return join(report, "\n")
+end
+
+"""
+Print real-time monitoring status
+"""
+function print_monitoring_status(monitor::PerformanceMonitor{T}) where {T <: AbstractFloat}
+    if !monitor.is_monitoring
+        println("Performance monitoring is not active")
+        return nothing
+    end
+    
+    metrics = get_real_time_metrics(monitor)
+    
+    println("=== Real-time Performance Status ===")
+    println("Iteration: $(metrics["current_iteration"])")
+    println("Wall time: $(round(metrics["current_wall_time"], digits=3)) seconds")
+    
+    if haskey(metrics, "current_residual")
+        println("Current residual: $(metrics["current_residual"])")
+    end
+    
+    if haskey(metrics, "current_memory_usage") && metrics["current_memory_usage"] > 0
+        println("Memory usage: $(round(metrics["current_memory_usage"], digits=2)) MB")
+    end
+    
+    if haskey(metrics, "load_imbalance_factor")
+        println("Load imbalance: $(round(metrics["load_imbalance_factor"], digits=4))")
+    end
+    
+    if haskey(metrics, "current_speedup")
+        println("Speedup: $(round(metrics["current_speedup"], digits=2))x")
+        println("Efficiency: $(round(metrics["current_efficiency"] * 100, digits=1))%")
+    end
+    
+    println("===================================")
+end
+
+"""
+Integrate performance monitoring with PararealManager
+"""
+function integrate_monitoring!(manager::PararealManager{T}, 
+                              monitor::PerformanceMonitor{T}) where {T <: AbstractFloat}
+    
+    # Set up MPI communication for monitoring
+    if manager.is_initialized && monitor.mpi_comm === nothing
+        monitor.mpi_comm = manager.mpi_comm
+        
+        # Update load analyzer with correct process count
+        monitor.load_analyzer = LoadBalanceAnalyzer{T}(manager.mpi_comm.size)
+    end
+    
+    return nothing
 end
 
 end # module Parareal
