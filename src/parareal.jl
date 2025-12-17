@@ -3268,18 +3268,32 @@ end
 """
 Calculate efficiency metrics based on collected performance data
 """
+function calculate_efficiency_metrics!(metrics::Any)
+    # Determine the type from metrics
+    T = typeof(metrics.total_wall_time)
+    calculate_efficiency_metrics!(metrics, T(0.0))
+end
+
 function calculate_efficiency_metrics!(metrics::Any,
-                                     sequential_time::T = T(0.0)) where {T <: AbstractFloat}
+                                     sequential_time::T) where {T <: AbstractFloat}
     
     # Calculate speedup factor
     if sequential_time > 0 && metrics.total_wall_time > 0
         metrics.efficiency_metrics.speedup_factor = sequential_time / metrics.total_wall_time
     else
+        # If no sequential time provided, calculate parallel efficiency directly
+        # based on computation vs communication time
+        total_computation_time = metrics.timing_data.coarse_solver_time + metrics.timing_data.fine_solver_time
+        if metrics.total_wall_time > 0
+            metrics.efficiency_metrics.parallel_efficiency = total_computation_time / metrics.total_wall_time
+        else
+            metrics.efficiency_metrics.parallel_efficiency = T(0.0)
+        end
         metrics.efficiency_metrics.speedup_factor = T(0.0)
     end
     
-    # Calculate parallel efficiency (speedup / number of processes)
-    if metrics.n_processes > 0
+    # Calculate parallel efficiency (speedup / number of processes) only if we have speedup
+    if sequential_time > 0 && metrics.n_processes > 0
         metrics.efficiency_metrics.parallel_efficiency = 
             metrics.efficiency_metrics.speedup_factor / metrics.n_processes
     end
@@ -3292,7 +3306,7 @@ function calculate_efficiency_metrics!(metrics::Any,
     
     # Calculate load balance factor (simplified - would need data from all processes)
     # For now, use a placeholder calculation
-    total_computation_time = metrics.timing_data.total_solver_time
+    total_computation_time = metrics.timing_data.coarse_solver_time + metrics.timing_data.fine_solver_time
     if total_computation_time > 0 && metrics.total_wall_time > 0
         metrics.efficiency_metrics.load_balance_factor = 
             total_computation_time / metrics.total_wall_time
@@ -3362,14 +3376,14 @@ function get_performance_summary(metrics::Any)
         summary["average_coarse_solver_time"] = 
             metrics.timing_data.coarse_solver_time / metrics.timing_data.coarse_solver_calls
     else
-        summary["average_coarse_solver_time"] = T(0.0)
+        summary["average_coarse_solver_time"] = typeof(metrics.timing_data.coarse_solver_time)(0.0)
     end
     
     if metrics.timing_data.fine_solver_calls > 0
         summary["average_fine_solver_time"] = 
             metrics.timing_data.fine_solver_time / metrics.timing_data.fine_solver_calls
     else
-        summary["average_fine_solver_time"] = T(0.0)
+        summary["average_fine_solver_time"] = typeof(metrics.timing_data.fine_solver_time)(0.0)
     end
     
     if metrics.communication_metrics.message_count > 0
@@ -3379,7 +3393,7 @@ function get_performance_summary(metrics::Any)
             metrics.communication_metrics.total_communication_time / metrics.communication_metrics.message_count
     else
         summary["average_message_size_bytes"] = 0
-        summary["average_communication_time_per_message"] = T(0.0)
+        summary["average_communication_time_per_message"] = typeof(metrics.communication_metrics.total_communication_time)(0.0)
     end
     
     # Timestamps
