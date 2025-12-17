@@ -11,15 +11,21 @@ using Dates
 # Import Heat3ds modules
 include("common.jl")
 include("parameter_optimization.jl")
+include("output_format.jl")
 using .Common
 using .Common: WorkBuffers, get_backend
 using .ParameterOptimization
+using .OutputFormat
 
 export PararealManager, PararealConfig, TimeWindow, MPICommunicator
 export initialize_mpi_parareal!, finalize_mpi_parareal!, run_parareal!
 export Heat3dsProblemData, create_heat3ds_problem_data
 export CoarseSolver, FineSolver, SolverConfiguration
 export PararealResult, ConvergenceMonitor
+# Output format exports
+export PararealOutputManager, OutputConfiguration, OutputMetadata
+export create_output_manager, generate_parareal_output!, ensure_output_consistency!
+export export_parareal_results
 # Parameter optimization exports
 export ParameterOptimizer, LiteratureGuidelines, ProblemCharacteristics
 export OptimizationResult, ParameterRecommendation

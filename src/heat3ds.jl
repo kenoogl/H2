@@ -12,6 +12,8 @@ include("NonUniform.jl")
 include("plotter.jl")
 include("convergence_history.jl")
 include("parse_log_residuals.jl")
+include("parareal.jl")
+include("output_format.jl")
 
 using .Common
 using .Common: WorkBuffers, ItrMax, Q_src, get_backend
@@ -19,6 +21,8 @@ using .NonUniform
 using .NonUniform: PBiCGSTAB!, CG!, calRHS!
 using .RHSCore
 using .BoundaryConditions
+using .Parareal
+using .OutputFormat
 
 """
 Mode3用の境界条件（NonUniform格子のIC問題）  
@@ -95,6 +99,116 @@ end
 
 
 """
+Run Parareal computation with Heat3ds integration
+"""
+function run_parareal_computation(Δh, Δt, wk, ZC, ΔZ, ID, solver, smoother, bc_set, par, parareal_config; is_steady::Bool=false)
+    # Create default parareal configuration if none provided
+    if parareal_config === nothing
+        parareal_config = Dict{String,Any}(
+            "total_time" => 10000.0,  # Default total simulation time
+            "n_time_windows" => 4,
+            "dt_coarse" => Δt * 10.0,  # Coarse time step (10x larger)
+            "dt_fine" => Δt,
+            "max_iterations" => 10,
+            "convergence_tolerance" => 1.0e-6,
+            "n_mpi_processes" => 1,  # Default to single process for now
+            "n_threads_per_process" => Threads.nthreads()
+        )
+    end
+    
+    try
+        # Create PararealConfig from dictionary
+        config = PararealConfig{Float64}(
+            total_time = Float64(parareal_config["total_time"]),
+            n_time_windows = parareal_config["n_time_windows"],
+            dt_coarse = Float64(parareal_config["dt_coarse"]),
+            dt_fine = Float64(parareal_config["dt_fine"]),
+            max_iterations = parareal_config["max_iterations"],
+            convergence_tolerance = Float64(parareal_config["convergence_tolerance"]),
+            n_mpi_processes = parareal_config["n_mpi_processes"],
+            n_threads_per_process = parareal_config["n_threads_per_process"]
+        )
+        
+        # Create PararealManager
+        manager = PararealManager{Float64}(config)
+        
+        # Initialize MPI environment for parareal
+        initialize_mpi_parareal!(manager)
+        
+        # Create Heat3ds problem data
+        problem_data = create_heat3ds_problem_data(Δh, ZC, ΔZ, ID, bc_set, par, is_steady)
+        
+        # Initial condition (current temperature field)
+        initial_condition = copy(wk.θ)
+        
+        # Run parareal computation
+        result = run_parareal!(manager, initial_condition, problem_data)
+        
+        # Update working buffers with final result
+        wk.θ .= result.final_solution
+        
+        # Generate parareal output in Heat3ds compatible format
+        # Task 8.4: Implement output format consistency
+        try
+            # Create output manager for parareal results
+            output_manager = create_output_manager(
+                base_filename = "heat3ds_parareal",
+                computation_mode = "parareal",
+                grid_size = size(result.final_solution),
+                n_time_windows = config.n_time_windows,
+                n_mpi_processes = config.n_mpi_processes
+            )
+            
+            # Generate outputs in Heat3ds compatible format
+            generated_files = generate_parareal_output!(output_manager, result.final_solution, result, problem_data)
+            
+            # Ensure output consistency with sequential Heat3ds format
+            is_consistent = ensure_output_consistency!(output_manager)
+            
+            if is_consistent
+                println("✓ Parareal output generated in Heat3ds compatible format")
+                println("  Generated files: $(join(generated_files, ", "))")
+            else
+                @warn "Output format consistency check failed"
+            end
+            
+        catch output_error
+            @warn "Failed to generate parareal output: $output_error"
+            @warn "Continuing with standard output..."
+        end
+        
+        # Finalize MPI environment
+        finalize_mpi_parareal!(manager)
+        
+        # Create convergence data compatible with existing Heat3ds format
+        conv_data = ConvergenceData(solver, smoother)
+        
+        # Add parareal-specific convergence information
+        if !isempty(result.residual_history)
+            for (i, residual) in enumerate(result.residual_history)
+                push!(conv_data.residuals, residual)
+                push!(conv_data.iterations, i)
+            end
+        end
+        
+        println("Parareal computation completed:")
+        println("  Converged: $(result.converged)")
+        println("  Iterations: $(result.iterations)")
+        println("  Final residual: $(length(result.residual_history) > 0 ? result.residual_history[end] : "N/A")")
+        println("  Computation time: $(result.computation_time) seconds")
+        
+        return conv_data
+        
+    catch e
+        @warn "Parareal computation failed: $e"
+        @warn "Falling back to sequential computation..."
+        
+        # Fallback to sequential computation
+        return main(Δh, Δt, wk, ZC, ΔZ, ID, solver, smoother, bc_set, par, is_steady=is_steady)
+    end
+end
+
+"""
 @param [in] Δh       セル幅
 @param [in] Δt       時間積分幅
 @param [in] wk       ベクトル群
@@ -168,7 +282,8 @@ end
 =#
 function q3d(NX::Int, NY::Int, NZ::Int,
          solver::String="sor", smoother::String="";
-         epsilon::Float64=1.0e-6, par::String="thread", is_steady::Bool=false)
+         epsilon::Float64=1.0e-6, par::String="thread", is_steady::Bool=false,
+         parareal::Bool=false, parareal_config::Union{Nothing, Dict{String,Any}}=nothing)
     global itr_tol = epsilon
 
     println("Julia version: $(VERSION)")
@@ -186,6 +301,20 @@ function q3d(NX::Int, NY::Int, NZ::Int,
         println("Analysis mode: Steady-state")
     else
         println("Analysis mode: Transient")
+    end
+    
+    if parareal
+        println("Time parallelization: Parareal enabled")
+        if parareal_config !== nothing
+            println("  Time windows: $(get(parareal_config, "n_time_windows", 4))")
+            println("  MPI processes: $(get(parareal_config, "n_mpi_processes", 1))")
+            println("  Coarse dt: $(get(parareal_config, "dt_coarse", "auto"))")
+            println("  Fine dt: $(get(parareal_config, "dt_fine", "auto"))")
+        else
+            println("  Using default parareal configuration")
+        end
+    else
+        println("Time parallelization: Sequential (standard)")
     end
 
     println("="^60)
@@ -229,9 +358,19 @@ function q3d(NX::Int, NY::Int, NZ::Int,
     BoundaryConditions.print_boundary_conditions(bc_set)
     BoundaryConditions.apply_boundary_conditions!(wk.θ, wk.λ, wk.ρ, wk.cp, wk.mask, bc_set)
 
-    tm = @elapsed conv_data = main(Δh, Δt, wk, ZC, ΔZ, ID, solver, smoother, bc_set, par, is_steady=is_steady)
+    # Execute computation: parareal or sequential
+    if parareal
+        # Parareal execution path
+        tm = @elapsed conv_data = run_parareal_computation(Δh, Δt, wk, ZC, ΔZ, ID, solver, smoother, bc_set, par, parareal_config, is_steady=is_steady)
+    else
+        # Sequential execution path (original behavior)
+        tm = @elapsed conv_data = main(Δh, Δt, wk, ZC, ΔZ, ID, solver, smoother, bc_set, par, is_steady=is_steady)
+    end
 
+    # Generate visualization outputs (consistent format for both parareal and sequential)
+    # Task 8.4: Ensure identical output format regardless of computation mode
     
+    # Generate standard Heat3ds visualization outputs (identical for both modes)
     plot_slice_xz_nu(2, mode, wk.θ, 0.3e-3, SZ, ox, Δh, Z, "temp3_xz_nu_y=0.3.png")
     plot_slice_xz_nu(2, mode, wk.θ, 0.4e-3, SZ, ox, Δh, Z, "temp3_xz_nu_y=0.4.png")
     plot_slice_xz_nu(2, mode, wk.θ, 0.5e-3, SZ, ox, Δh, Z, "temp3_xz_nu_y=0.5.png")
@@ -241,28 +380,109 @@ function q3d(NX::Int, NY::Int, NZ::Int,
     plot_line_z_nu(wk.θ, SZ, ox, Δh, Z, 0.6e-3, 0.6e-3,"temp3Z_ctr", "Center")
     plot_line_z_nu(wk.θ, SZ, ox, Δh, Z, 0.4e-3, 0.4e-3,"temp3Z_tsv", "TSV")
     
+    # Generate additional output files with consistent format
+    # Task 8.4: Ensure parareal and sequential generate identical output formats
+    try
+        computation_mode = parareal ? "parareal" : "sequential"
+        
+        # Create output manager for consistent format generation
+        output_manager = create_output_manager(
+            base_filename = "heat3ds_final",
+            computation_mode = computation_mode,
+            grid_size = (NX, NY, NZ),
+            n_time_windows = parareal ? get(parareal_config, "n_time_windows", 1) : 1,
+            n_mpi_processes = parareal ? get(parareal_config, "n_mpi_processes", 1) : 1,
+            include_metadata = parareal,  # Only include metadata for parareal
+            maintain_compatibility = true
+        )
+        
+        # Generate temperature output files in Heat3ds format
+        result_data = Dict(
+            :final_solution => wk.θ,
+            :converged => true,
+            :computation_time => tm,
+            :residual_history => Float64[]  # Will be populated from conv_data if available
+        )
+        
+        # Add convergence data if available
+        if @isdefined(conv_data) && hasfield(typeof(conv_data), :residuals)
+            result_data[:residual_history] = conv_data.residuals
+        end
+        
+        generated_files = generate_parareal_output!(output_manager, wk.θ, result_data, nothing)
+        
+        # Validate output consistency
+        is_consistent = ensure_output_consistency!(output_manager)
+        
+        if is_consistent
+            println("✓ Output files generated in Heat3ds compatible format")
+            if parareal
+                println("  Mode: Parareal time parallelization")
+            else
+                println("  Mode: Sequential time stepping")
+            end
+            println("  Files: $(join(generated_files, ", "))")
+        else
+            @warn "Output format consistency validation failed"
+        end
+        
+    catch output_error
+        @warn "Failed to generate consistent output format: $output_error"
+        # Continue with standard Heat3ds behavior
+    end
+    
     # 収束履歴の出力（反復解法の場合のみ）
+    # Task 8.4: Maintain identical convergence output format for both modes
     if solver == "pbicgstab" || solver == "cg"
         # 収束グラフとCSV出力
         conv_filename = "convergence_$(solver)_$(NX)x$(NY)x$(NZ)"
         if !isempty(smoother)
             conv_filename *= "_$(smoother)"
         end
+        
+        # Add computation mode to filename for clarity, but maintain identical format
+        if parareal
+            conv_filename *= "_parareal"
+        end
 
-        # プロットとCSV出力
+        # プロットとCSV出力 (identical format for both modes)
         try
             plot_convergence_curve(conv_data, "$(conv_filename).png", target_tol=itr_tol, show_markers=false)
             export_convergence_csv(conv_data, "$(conv_filename).csv")
+            
+            # Task 8.4: Validate that output format is consistent between modes
+            if parareal
+                # Verify parareal convergence output matches Heat3ds format
+                if isfile("$(conv_filename).csv") && isfile("$(conv_filename).png")
+                    println("✓ Parareal convergence output generated in Heat3ds compatible format")
+                    
+                    # Additional validation: check CSV format consistency
+                    csv_lines = readlines("$(conv_filename).csv")
+                    if length(csv_lines) > 0 && occursin("iteration", csv_lines[1])
+                        println("  ✓ CSV format validated: Heat3ds compatible headers")
+                    end
+                else
+                    @warn "Parareal convergence output files missing"
+                end
+            else
+                println("✓ Sequential convergence output generated in standard Heat3ds format")
+            end
+            
         catch e
             println("Error in convergence history output: $e")
         end
 
-        # 収束情報の表示
+        # 収束情報の表示 (identical format for both modes)
         info = get_convergence_info(conv_data)
         if !isempty(info)
             println("\n=== Convergence Information ===")
             println("Grid: $(NX)x$(NY)x$(NZ)")
             println("Solver: $(info["solver"]), Smoother: $(info["smoother"])")
+            if parareal
+                println("Mode: Parareal time parallelization")
+            else
+                println("Mode: Sequential time stepping")
+            end
             println("Iterations: $(info["iterations"])")
             initial_res_str = @sprintf("%.6E", info["initial_residual"])
             final_res_str = @sprintf("%.6E", info["final_residual"])
