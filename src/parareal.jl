@@ -36,6 +36,11 @@ export ParameterSpaceExplorer, ExplorationResult, PerformanceMap
 export create_parameter_space_explorer, explore_parameter_space!
 export generate_performance_map, save_exploration_results
 export load_exploration_results, find_optimal_configurations
+# Performance monitoring exports (will be defined later)
+# export PerformanceMetrics, TimingData, CommunicationMetrics, EfficiencyMetrics
+# export create_performance_metrics, update_timing_data!, record_communication_overhead!
+# export calculate_efficiency_metrics!, get_performance_summary
+# export reset_performance_metrics!, merge_performance_metrics
 
 """
 Parareal configuration parameters
@@ -211,6 +216,7 @@ mutable struct PararealManager{T <: AbstractFloat}
     config::PararealConfig{T}
     mpi_comm::MPICommunicator{T}
     time_windows::Vector{TimeWindow{T}}
+    performance_metrics::Union{Any, Nothing}  # Will be PerformanceMetrics{T} after definition
     is_initialized::Bool
     
     function PararealManager{T}(config::PararealConfig{T}) where {T <: AbstractFloat}
@@ -218,7 +224,7 @@ mutable struct PararealManager{T <: AbstractFloat}
         mpi_comm = MPICommunicator{T}(MPI.COMM_NULL)
         time_windows = Vector{TimeWindow{T}}()
         
-        return new{T}(config, mpi_comm, time_windows, false)
+        return new{T}(config, mpi_comm, time_windows, nothing, false)
     end
 end
 
@@ -237,6 +243,11 @@ function initialize_mpi_parareal!(manager::PararealManager{T}) where {T <: Abstr
     
     rank = manager.mpi_comm.rank
     mpi_size = manager.mpi_comm.size
+    
+    # Initialize performance metrics
+    manager.performance_metrics = create_performance_metrics(
+        rank, mpi_size, manager.config.n_threads_per_process
+    )
     
     # Validate MPI process count
     if mpi_size != manager.config.n_mpi_processes
@@ -452,7 +463,8 @@ Exchange temperature fields between MPI processes
 """
 function exchange_temperature_fields!(comm::MPICommunicator{T}, 
                                     temperature_data::Array{T,3},
-                                    target_rank::Int) where {T <: AbstractFloat}
+                                    target_rank::Int,
+                                    performance_metrics::Union{Any, Nothing} = nothing) where {T <: AbstractFloat}
     # Check for invalid target rank first (before MPI check)
     if target_rank < 0 || target_rank >= comm.size
         error("Invalid target rank: $target_rank")
@@ -483,6 +495,9 @@ function exchange_temperature_fields!(comm::MPICommunicator{T},
     # Use non-blocking communication for better performance
     tag = 100 + comm.rank  # Unique tag for each sender
     
+    # Measure communication time
+    comm_start = time_ns()
+    
     # Post non-blocking send
     send_req = MPI.Isend(comm.send_buffers[target_rank + 1], comm.comm; dest=target_rank, tag=tag)
     
@@ -496,6 +511,14 @@ function exchange_temperature_fields!(comm::MPICommunicator{T},
     # Wait for completion
     MPI.Waitall(comm.requests)
     empty!(comm.requests)
+    
+    # Record communication time
+    if performance_metrics !== nothing
+        comm_time = T((time_ns() - comm_start) / 1e9)
+        data_size = sizeof(temperature_data)
+        record_communication_overhead!(performance_metrics, :send, comm_time / 2, data_size)
+        record_communication_overhead!(performance_metrics, :receive, comm_time / 2, data_size)
+    end
     
     # Return received data
     return copy(comm.recv_buffers[target_rank + 1])
@@ -557,13 +580,22 @@ end
 """
 Synchronize all processes at a barrier
 """
-function synchronize_processes!(comm::MPICommunicator{T}) where {T <: AbstractFloat}
+function synchronize_processes!(comm::MPICommunicator{T},
+                              performance_metrics::Union{Any, Nothing} = nothing) where {T <: AbstractFloat}
     if comm.comm == MPI.COMM_NULL
         # For testing without MPI
         return nothing
     end
     
+    # Measure synchronization time
+    sync_start = time_ns()
     MPI.Barrier(comm.comm)
+    
+    if performance_metrics !== nothing
+        sync_time = T((time_ns() - sync_start) / 1e9)
+        record_communication_overhead!(performance_metrics, :synchronization, sync_time)
+    end
+    
     return nothing
 end
 
@@ -712,15 +744,113 @@ function get_hybrid_statistics(coordinator::HybridCoordinator{T}) where {T <: Ab
 end
 
 """
-Parareal iteration result structure
+Timing data for individual solver components
 """
-struct PararealResult{T <: AbstractFloat}
+mutable struct TimingData{T <: AbstractFloat}
+    coarse_solver_time::T
+    fine_solver_time::T
+    coarse_solver_calls::Int
+    fine_solver_calls::Int
+    interpolation_time::T
+    restriction_time::T
+    total_solver_time::T
+    
+    function TimingData{T}() where {T <: AbstractFloat}
+        return new{T}(T(0.0), T(0.0), 0, 0, T(0.0), T(0.0), T(0.0))
+    end
+end
+
+"""
+MPI communication performance metrics
+"""
+mutable struct CommunicationMetrics{T <: AbstractFloat}
+    send_time::T
+    receive_time::T
+    synchronization_time::T
+    broadcast_time::T
+    allreduce_time::T
+    total_communication_time::T
+    message_count::Int
+    bytes_transferred::Int
+    
+    function CommunicationMetrics{T}() where {T <: AbstractFloat}
+        return new{T}(T(0.0), T(0.0), T(0.0), T(0.0), T(0.0), T(0.0), 0, 0)
+    end
+end
+
+"""
+Efficiency calculation metrics
+"""
+mutable struct EfficiencyMetrics{T <: AbstractFloat}
+    parallel_efficiency::T
+    strong_scaling_efficiency::T
+    weak_scaling_efficiency::T
+    speedup_factor::T
+    load_balance_factor::T
+    communication_overhead_ratio::T
+    
+    function EfficiencyMetrics{T}() where {T <: AbstractFloat}
+        return new{T}(T(0.0), T(0.0), T(0.0), T(0.0), T(0.0), T(0.0))
+    end
+end
+
+"""
+Comprehensive performance metrics for Parareal algorithm
+"""
+mutable struct PerformanceMetrics{T <: AbstractFloat}
+    timing_data::TimingData{T}
+    communication_metrics::CommunicationMetrics{T}
+    efficiency_metrics::EfficiencyMetrics{T}
+    
+    # Overall performance tracking
+    total_wall_time::T
+    sequential_reference_time::T
+    parareal_iterations::Int
+    convergence_time::T
+    
+    # Memory usage tracking
+    peak_memory_usage_mb::T
+    average_memory_usage_mb::T
+    
+    # Process-specific metrics
+    process_rank::Int
+    n_processes::Int
+    n_threads_per_process::Int
+    
+    # Timestamp for performance tracking
+    start_timestamp::DateTime
+    end_timestamp::Union{DateTime, Nothing}
+    
+    function PerformanceMetrics{T}(rank::Int, n_processes::Int, n_threads::Int) where {T <: AbstractFloat}
+        return new{T}(
+            TimingData{T}(),
+            CommunicationMetrics{T}(),
+            EfficiencyMetrics{T}(),
+            T(0.0), T(0.0), 0, T(0.0),
+            T(0.0), T(0.0),
+            rank, n_processes, n_threads,
+            now(), nothing
+        )
+    end
+end
+
+# Export performance monitoring types and functions
+export PerformanceMetrics, TimingData, CommunicationMetrics, EfficiencyMetrics
+export create_performance_metrics, update_timing_data!, record_communication_overhead!
+export calculate_efficiency_metrics!, get_performance_summary
+export reset_performance_metrics!, merge_performance_metrics
+
+"""
+Parareal iteration result structure (forward declaration)
+"""
+mutable struct PararealResult{T <: AbstractFloat}
     final_solution::Array{T,3}
     converged::Bool
     iterations::Int
     residual_history::Vector{T}
     computation_time::T
     communication_time::T
+    performance_metrics::Union{Any, Nothing}  # Will be PerformanceMetrics{T} after definition
 end
 
 """
@@ -864,15 +994,45 @@ function run_parareal!(manager::PararealManager{T},
         
         total_time = time_ns() / 1e9 - total_start_time
         
-        if rank == 0
-            println("Parareal computation completed:")
-            println("  Converged: $(result.converged)")
-            println("  Iterations: $(result.iterations)")
-            println("  Final residual: $(length(result.residual_history) > 0 ? result.residual_history[end] : "N/A")")
-            println("  Total time: $(total_time) seconds")
+        # Finalize performance metrics
+        if manager.performance_metrics !== nothing
+            manager.performance_metrics.total_wall_time = T(total_time)
+            manager.performance_metrics.parareal_iterations = result.iterations
+            manager.performance_metrics.convergence_time = T(total_time)
+            manager.performance_metrics.end_timestamp = now()
+            
+            # Calculate efficiency metrics
+            calculate_efficiency_metrics!(manager.performance_metrics)
+            
+            if rank == 0
+                println("Parareal computation completed:")
+                println("  Converged: $(result.converged)")
+                println("  Iterations: $(result.iterations)")
+                println("  Final residual: $(length(result.residual_history) > 0 ? result.residual_history[end] : "N/A")")
+                println("  Total time: $(total_time) seconds")
+                println()
+                print_performance_report(manager.performance_metrics)
+            end
+        else
+            if rank == 0
+                println("Parareal computation completed:")
+                println("  Converged: $(result.converged)")
+                println("  Iterations: $(result.iterations)")
+                println("  Final residual: $(length(result.residual_history) > 0 ? result.residual_history[end] : "N/A")")
+                println("  Total time: $(total_time) seconds")
+            end
         end
         
-        return result
+        # Return result with performance metrics
+        return PararealResult{T}(
+            result.final_solution,
+            result.converged,
+            result.iterations,
+            result.residual_history,
+            result.computation_time,
+            result.communication_time,
+            manager.performance_metrics
+        )
         
     catch e
         error_context = string(e)
@@ -1080,12 +1240,12 @@ function perform_coarse_prediction_phase!(manager::PararealManager{T},
         
         # Solve coarse problem from window start to end
         solutions[i + 1] = solve_coarse!(
-            coarse_solver, solutions[i], window, problem_data
+            coarse_solver, solutions[i], window, problem_data, manager.performance_metrics
         )
     end
     
     # Synchronize to ensure all processes have completed coarse phase
-    synchronize_processes!(manager.mpi_comm)
+    synchronize_processes!(manager.mpi_comm, manager.performance_metrics)
     
     return nothing
 end
@@ -1107,11 +1267,11 @@ function perform_coarse_prediction_on_old_solutions!(manager::PararealManager{T}
         
         # Solve coarse problem from old solution at window start
         old_solutions[i + 1] = solve_coarse!(
-            coarse_solver, old_solutions[i], window, problem_data
+            coarse_solver, old_solutions[i], window, problem_data, manager.performance_metrics
         )
     end
     
-    synchronize_processes!(manager.mpi_comm)
+    synchronize_processes!(manager.mpi_comm, manager.performance_metrics)
     
     return nothing
 end
@@ -1136,7 +1296,7 @@ function perform_fine_correction_phase!(manager::PararealManager{T},
         if window_index !== nothing
             # Solve fine problem for this time window
             fine_solutions[window_index + 1] = solve_fine!(
-                fine_solver, fine_solutions[window_index], window, problem_data
+                fine_solver, fine_solutions[window_index], window, problem_data, manager.performance_metrics
             )
         end
     end
@@ -1165,20 +1325,20 @@ function exchange_fine_solutions!(manager::PararealManager{T},
             for target_rank in 0:(mpi_size-1)
                 if target_rank != rank
                     exchange_temperature_fields!(
-                        manager.mpi_comm, fine_solutions[window_idx + 1], target_rank
+                        manager.mpi_comm, fine_solutions[window_idx + 1], target_rank, manager.performance_metrics
                     )
                 end
             end
         else
             # This process needs to receive this window solution
             fine_solutions[window_idx + 1] = exchange_temperature_fields!(
-                manager.mpi_comm, fine_solutions[window_idx + 1], responsible_rank
+                manager.mpi_comm, fine_solutions[window_idx + 1], responsible_rank, manager.performance_metrics
             )
         end
     end
     
     # Synchronize to ensure all exchanges are complete
-    synchronize_processes!(manager.mpi_comm)
+    synchronize_processes!(manager.mpi_comm, manager.performance_metrics)
     
     return nothing
 end
@@ -1713,7 +1873,8 @@ Solve using coarse solver (reduced resolution and simplified physics)
 function solve_coarse!(solver::CoarseSolver{T}, 
                       initial_condition::Array{T,3},
                       time_window::TimeWindow{T},
-                      problem_data::Any) where {T <: AbstractFloat}
+                      problem_data::Any,
+                      performance_metrics::Union{Any, Nothing} = nothing) where {T <: AbstractFloat}
     
     # Create coarse grid
     fine_size = Base.size(initial_condition)
@@ -1795,7 +1956,10 @@ Integrates with existing Heat3ds solver infrastructure
 function solve_fine!(solver::FineSolver{T},
                     initial_condition::Array{T,3},
                     time_window::TimeWindow{T},
-                    problem_data::Heat3dsProblemData{T}) where {T <: AbstractFloat}
+                    problem_data::Heat3dsProblemData{T},
+                    performance_metrics::Union{Any, Nothing} = nothing) where {T <: AbstractFloat}
+    
+    start_time = time_ns()
     
     # Create working buffers for the fine solver
     grid_size = Base.size(initial_condition)
@@ -1872,6 +2036,12 @@ function solve_fine!(solver::FineSolver{T},
         current_time += dt
     end
     
+    # Record total fine solver time
+    if performance_metrics !== nothing
+        total_time = T((time_ns() - start_time) / 1e9)
+        update_timing_data!(performance_metrics, :fine, total_time)
+    end
+    
     return copy(wk.θ)
 end
 
@@ -1912,7 +2082,10 @@ Solve using coarse solver with Heat3ds problem data
 function solve_coarse!(solver::CoarseSolver{T}, 
                       initial_condition::Array{T,3},
                       time_window::TimeWindow{T},
-                      problem_data::Heat3dsProblemData{T}) where {T <: AbstractFloat}
+                      problem_data::Heat3dsProblemData{T},
+                      performance_metrics::Union{Any, Nothing} = nothing) where {T <: AbstractFloat}
+    
+    start_time = time_ns()
     
     # Create coarse grid
     fine_size = Base.size(initial_condition)
@@ -1921,8 +2094,15 @@ function solve_coarse!(solver::CoarseSolver{T},
     # Initialize coarse grid data
     coarse_solution = zeros(T, coarse_size...)
     
-    # Restrict initial condition to coarse grid
-    restrict_fine_to_coarse!(coarse_solution, initial_condition)
+    # Restrict initial condition to coarse grid (measure restriction time)
+    if performance_metrics !== nothing
+        restriction_start = time_ns()
+        restrict_fine_to_coarse!(coarse_solution, initial_condition)
+        restriction_time = T((time_ns() - restriction_start) / 1e9)
+        update_timing_data!(performance_metrics, :restriction, restriction_time)
+    else
+        restrict_fine_to_coarse!(coarse_solution, initial_condition)
+    end
     
     # Simplified time stepping for coarse solver
     current_time = time_window.start_time
@@ -1947,9 +2127,20 @@ function solve_coarse!(solver::CoarseSolver{T},
         current_time += dt
     end
     
-    # Interpolate back to fine grid
+    # Interpolate back to fine grid (measure interpolation time)
     fine_solution = zeros(T, fine_size...)
-    interpolate_coarse_to_fine!(fine_solution, coarse_solution)
+    if performance_metrics !== nothing
+        interpolation_start = time_ns()
+        interpolate_coarse_to_fine!(fine_solution, coarse_solution)
+        interpolation_time = T((time_ns() - interpolation_start) / 1e9)
+        update_timing_data!(performance_metrics, :interpolation, interpolation_time)
+        
+        # Record total coarse solver time
+        total_time = T((time_ns() - start_time) / 1e9)
+        update_timing_data!(performance_metrics, :coarse, total_time)
+    else
+        interpolate_coarse_to_fine!(fine_solution, coarse_solution)
+    end
     
     return fine_solution
 end
@@ -2506,6 +2697,288 @@ function solve_time_step!(solver::FineSolver{T},
 end
 
 """
+Accuracy metrics for validation
+"""
+struct AccuracyMetrics{T <: AbstractFloat}
+    l2_norm_error::T
+    max_pointwise_error::T
+    relative_error::T
+    convergence_rate::T
+    error_distribution::Array{T,3}
+    
+    function AccuracyMetrics{T}(l2_error::T, max_error::T, rel_error::T, conv_rate::T, error_dist::Array{T,3}) where {T <: AbstractFloat}
+        return new{T}(l2_error, max_error, rel_error, conv_rate, error_dist)
+    end
+end
+
+"""
+Validation result structure
+"""
+struct ValidationResult{T <: AbstractFloat}
+    timestamp::DateTime
+    problem_id::String
+    parareal_config::PararealConfig{T}
+    accuracy_metrics::AccuracyMetrics{T}
+    is_within_tolerance::Bool
+    recommendations::Vector{String}
+    
+    function ValidationResult{T}(timestamp::DateTime, problem_id::String, config::PararealConfig{T}, 
+                               metrics::AccuracyMetrics{T}, within_tolerance::Bool, 
+                               recommendations::Vector{String}) where {T <: AbstractFloat}
+        return new{T}(timestamp, problem_id, config, metrics, within_tolerance, recommendations)
+    end
+end
+
+"""
+Sequential solver for reference computation
+"""
+struct SequentialSolver{T <: AbstractFloat}
+    dt::T
+    solver_type::Symbol
+    tolerance::T
+    max_iterations::Int
+    
+    function SequentialSolver{T}(;
+        dt::T = T(0.01),
+        solver_type::Symbol = :pbicgstab,
+        tolerance::T = T(1e-6),
+        max_iterations::Int = 8000
+    ) where {T <: AbstractFloat}
+        return new{T}(dt, solver_type, tolerance, max_iterations)
+    end
+end
+
+"""
+Tolerance settings for validation
+"""
+struct ToleranceSettings{T <: AbstractFloat}
+    absolute_tolerance::T
+    relative_tolerance::T
+    max_pointwise_tolerance::T
+    convergence_rate_tolerance::T
+    
+    function ToleranceSettings{T}(;
+        absolute_tolerance::T = T(1e-6),
+        relative_tolerance::T = T(1e-4),
+        max_pointwise_tolerance::T = T(1e-5),
+        convergence_rate_tolerance::T = T(0.1)
+    ) where {T <: AbstractFloat}
+        return new{T}(absolute_tolerance, relative_tolerance, max_pointwise_tolerance, convergence_rate_tolerance)
+    end
+end
+
+"""
+Validation manager for sequential comparison and accuracy verification
+"""
+mutable struct ValidationManager{T <: AbstractFloat}
+    reference_solver::SequentialSolver{T}
+    accuracy_metrics::Union{AccuracyMetrics{T}, Nothing}
+    validation_history::Vector{ValidationResult{T}}
+    tolerance_settings::ToleranceSettings{T}
+    
+    function ValidationManager{T}(;
+        reference_solver::Union{SequentialSolver{T}, Nothing} = nothing,
+        tolerance_settings::Union{ToleranceSettings{T}, Nothing} = nothing
+    ) where {T <: AbstractFloat}
+        
+        ref_solver = reference_solver !== nothing ? reference_solver : SequentialSolver{T}()
+        tol_settings = tolerance_settings !== nothing ? tolerance_settings : ToleranceSettings{T}()
+        
+        return new{T}(ref_solver, nothing, Vector{ValidationResult{T}}(), tol_settings)
+    end
+end
+
+"""
+Validate parareal results against sequential computation
+"""
+function validate_against_sequential!(manager::ValidationManager{T}, 
+                                    parareal_result::PararealResult{T},
+                                    sequential_result::Array{T,3},
+                                    problem_id::String,
+                                    config::PararealConfig{T}) where {T <: AbstractFloat}
+    
+    # Compute accuracy metrics
+    metrics = compute_accuracy_metrics(parareal_result.final_solution, sequential_result)
+    
+    # Check if within tolerance
+    within_tolerance = check_tolerance(metrics, manager.tolerance_settings)
+    
+    # Generate recommendations
+    recommendations = generate_recommendations(metrics, manager.tolerance_settings, config)
+    
+    # Create validation result
+    result = ValidationResult{T}(
+        now(), problem_id, config, metrics, within_tolerance, recommendations
+    )
+    
+    # Store in history
+    push!(manager.validation_history, result)
+    manager.accuracy_metrics = metrics
+    
+    return result
+end
+
+"""
+Compute accuracy metrics between parareal and sequential solutions
+"""
+function compute_accuracy_metrics(parareal_data::Array{T,3}, sequential_data::Array{T,3}) where {T <: AbstractFloat}
+    # Ensure same size
+    if size(parareal_data) != size(sequential_data)
+        error("Solution arrays must have the same size")
+    end
+    
+    # Compute error distribution
+    error_dist = abs.(parareal_data - sequential_data)
+    
+    # L2 norm error
+    l2_error = sqrt(sum(error_dist.^2)) / sqrt(sum(sequential_data.^2))
+    
+    # Maximum pointwise error
+    max_error = maximum(error_dist)
+    
+    # Relative error (normalized by sequential solution magnitude)
+    seq_magnitude = sqrt(sum(sequential_data.^2))
+    relative_error = seq_magnitude > 0 ? sqrt(sum(error_dist.^2)) / seq_magnitude : T(0.0)
+    
+    # Convergence rate (placeholder - would need iteration history)
+    convergence_rate = T(0.0)
+    
+    return AccuracyMetrics{T}(l2_error, max_error, relative_error, convergence_rate, error_dist)
+end
+
+"""
+Check if accuracy metrics are within tolerance
+"""
+function check_tolerance(metrics::AccuracyMetrics{T}, tolerance_settings::ToleranceSettings{T}) where {T <: AbstractFloat}
+    return (metrics.l2_norm_error <= tolerance_settings.absolute_tolerance &&
+            metrics.relative_error <= tolerance_settings.relative_tolerance &&
+            metrics.max_pointwise_error <= tolerance_settings.max_pointwise_tolerance)
+end
+
+"""
+Generate recommendations based on accuracy metrics
+"""
+function generate_recommendations(metrics::AccuracyMetrics{T}, 
+                                tolerance_settings::ToleranceSettings{T},
+                                config::PararealConfig{T}) where {T <: AbstractFloat}
+    
+    recommendations = String[]
+    
+    if metrics.l2_norm_error > tolerance_settings.absolute_tolerance
+        push!(recommendations, "L2 error exceeds tolerance. Consider reducing coarse time step or increasing parareal iterations.")
+    end
+    
+    if metrics.relative_error > tolerance_settings.relative_tolerance
+        push!(recommendations, "Relative error exceeds tolerance. Consider improving coarse solver accuracy.")
+    end
+    
+    if metrics.max_pointwise_error > tolerance_settings.max_pointwise_tolerance
+        push!(recommendations, "Maximum pointwise error exceeds tolerance. Check for numerical instabilities.")
+    end
+    
+    # Time step ratio recommendations
+    time_step_ratio = config.dt_coarse / config.dt_fine
+    if time_step_ratio > 100 && metrics.l2_norm_error > tolerance_settings.absolute_tolerance * 0.1
+        push!(recommendations, "Large time step ratio ($time_step_ratio) may be causing accuracy issues. Consider reducing coarse time step.")
+    end
+    
+    if isempty(recommendations)
+        push!(recommendations, "Validation passed. Parareal results are within acceptable tolerance.")
+    end
+    
+    return recommendations
+end
+
+"""
+Generate error analysis report
+"""
+function generate_error_analysis_report(validation_result::ValidationResult{T}) where {T <: AbstractFloat}
+    report = String[]
+    
+    push!(report, "=== Parareal Validation Report ===")
+    push!(report, "Timestamp: $(validation_result.timestamp)")
+    push!(report, "Problem ID: $(validation_result.problem_id)")
+    push!(report, "")
+    
+    metrics = validation_result.accuracy_metrics
+    push!(report, "Accuracy Metrics:")
+    push!(report, "  L2 norm error: $(metrics.l2_norm_error)")
+    push!(report, "  Max pointwise error: $(metrics.max_pointwise_error)")
+    push!(report, "  Relative error: $(metrics.relative_error)")
+    push!(report, "")
+    
+    push!(report, "Validation Status: $(validation_result.is_within_tolerance ? "PASSED" : "FAILED")")
+    push!(report, "")
+    
+    push!(report, "Recommendations:")
+    for rec in validation_result.recommendations
+        push!(report, "  - $rec")
+    end
+    
+    push!(report, "================================")
+    
+    return join(report, "\n")
+end
+
+"""
+Check numerical stability of parareal computation
+"""
+function check_numerical_stability(convergence_history::Vector{T}) where {T <: AbstractFloat}
+    if length(convergence_history) < 3
+        return true, "Insufficient data for stability analysis"
+    end
+    
+    # Check for monotonic decrease in residuals
+    is_monotonic = all(convergence_history[i] >= convergence_history[i+1] for i in 1:length(convergence_history)-1)
+    
+    # Check for stagnation
+    recent_changes = [abs(convergence_history[i] - convergence_history[i+1]) / convergence_history[i] 
+                     for i in max(1, length(convergence_history)-3):length(convergence_history)-1]
+    is_stagnant = all(change < 1e-8 for change in recent_changes)
+    
+    # Check for oscillations
+    sign_changes = sum(sign(convergence_history[i] - convergence_history[i+1]) != 
+                      sign(convergence_history[i+1] - convergence_history[i+2]) 
+                      for i in 1:length(convergence_history)-2)
+    has_oscillations = sign_changes > length(convergence_history) / 3
+    
+    if !is_monotonic && has_oscillations
+        return false, "Convergence shows oscillatory behavior, indicating potential numerical instability"
+    elseif is_stagnant
+        return false, "Convergence has stagnated, may indicate poor parameter choice"
+    else
+        return true, "Convergence appears numerically stable"
+    end
+end
+
+"""
+Run sequential computation for validation reference
+"""
+function run_sequential_reference!(manager::ValidationManager{T},
+                                 initial_condition::Array{T,3},
+                                 problem_data::Heat3dsProblemData{T},
+                                 total_time::T) where {T <: AbstractFloat}
+    
+    solver = manager.reference_solver
+    current_solution = copy(initial_condition)
+    current_time = T(0.0)
+    dt = solver.dt
+    
+    # Sequential time stepping
+    while current_time < total_time
+        # Adjust time step to not overshoot
+        actual_dt = min(dt, total_time - current_time)
+        
+        # Use simple diffusion for reference (in practice, would use full Heat3ds solver)
+        apply_simple_diffusion_step!(current_solution, actual_dt, T(0.1))
+        
+        current_time += actual_dt
+    end
+    
+    return current_solution
+end
+
+"""
 Fallback to sequential computation when Parareal fails
 """
 function fallback_to_sequential!(manager::PararealManager{T},
@@ -2661,6 +3134,380 @@ function log_graceful_degradation_event(manager::PararealManager{T},
         @info "Sequential fallback successful: $fallback_successful"
         @info "======================================"
     end
+end
+
+# ===== Performance Metrics Implementation =====
+
+"""
+Create performance metrics instance for a specific MPI process
+"""
+function create_performance_metrics(rank::Int, n_processes::Int, n_threads::Int)
+    return PerformanceMetrics{Float64}(rank, n_processes, n_threads)
+end
+
+"""
+Update timing data for solver performance
+"""
+function update_timing_data!(metrics::Any, 
+                           solver_type::Symbol, 
+                           execution_time::T) where {T <: AbstractFloat}
+    
+    if solver_type == :coarse
+        metrics.timing_data.coarse_solver_time += execution_time
+        metrics.timing_data.coarse_solver_calls += 1
+    elseif solver_type == :fine
+        metrics.timing_data.fine_solver_time += execution_time
+        metrics.timing_data.fine_solver_calls += 1
+    elseif solver_type == :interpolation
+        metrics.timing_data.interpolation_time += execution_time
+    elseif solver_type == :restriction
+        metrics.timing_data.restriction_time += execution_time
+    end
+    
+    # Update total solver time
+    metrics.timing_data.total_solver_time = (
+        metrics.timing_data.coarse_solver_time +
+        metrics.timing_data.fine_solver_time +
+        metrics.timing_data.interpolation_time +
+        metrics.timing_data.restriction_time
+    )
+    
+    return nothing
+end
+
+"""
+Record MPI communication overhead
+"""
+function record_communication_overhead!(metrics::Any,
+                                      operation_type::Symbol,
+                                      execution_time::T,
+                                      bytes_transferred::Int = 0) where {T <: AbstractFloat}
+    
+    if operation_type == :send
+        metrics.communication_metrics.send_time += execution_time
+    elseif operation_type == :receive
+        metrics.communication_metrics.receive_time += execution_time
+    elseif operation_type == :synchronization
+        metrics.communication_metrics.synchronization_time += execution_time
+    elseif operation_type == :broadcast
+        metrics.communication_metrics.broadcast_time += execution_time
+    elseif operation_type == :allreduce
+        metrics.communication_metrics.allreduce_time += execution_time
+    end
+    
+    # Update totals
+    metrics.communication_metrics.total_communication_time = (
+        metrics.communication_metrics.send_time +
+        metrics.communication_metrics.receive_time +
+        metrics.communication_metrics.synchronization_time +
+        metrics.communication_metrics.broadcast_time +
+        metrics.communication_metrics.allreduce_time
+    )
+    
+    metrics.communication_metrics.message_count += 1
+    metrics.communication_metrics.bytes_transferred += bytes_transferred
+    
+    return nothing
+end
+
+"""
+Calculate efficiency metrics based on collected performance data
+"""
+function calculate_efficiency_metrics!(metrics::Any,
+                                     sequential_time::T = T(0.0)) where {T <: AbstractFloat}
+    
+    # Calculate speedup factor
+    if sequential_time > 0 && metrics.total_wall_time > 0
+        metrics.efficiency_metrics.speedup_factor = sequential_time / metrics.total_wall_time
+    else
+        metrics.efficiency_metrics.speedup_factor = T(0.0)
+    end
+    
+    # Calculate parallel efficiency (speedup / number of processes)
+    if metrics.n_processes > 0
+        metrics.efficiency_metrics.parallel_efficiency = 
+            metrics.efficiency_metrics.speedup_factor / metrics.n_processes
+    end
+    
+    # Calculate communication overhead ratio
+    if metrics.total_wall_time > 0
+        metrics.efficiency_metrics.communication_overhead_ratio = 
+            metrics.communication_metrics.total_communication_time / metrics.total_wall_time
+    end
+    
+    # Calculate load balance factor (simplified - would need data from all processes)
+    # For now, use a placeholder calculation
+    total_computation_time = metrics.timing_data.total_solver_time
+    if total_computation_time > 0 && metrics.total_wall_time > 0
+        metrics.efficiency_metrics.load_balance_factor = 
+            total_computation_time / metrics.total_wall_time
+    end
+    
+    # Strong scaling efficiency (placeholder - would need baseline measurements)
+    metrics.efficiency_metrics.strong_scaling_efficiency = 
+        metrics.efficiency_metrics.parallel_efficiency
+    
+    # Weak scaling efficiency (placeholder - would need problem size scaling data)
+    metrics.efficiency_metrics.weak_scaling_efficiency = 
+        metrics.efficiency_metrics.parallel_efficiency
+    
+    return nothing
+end
+
+"""
+Get comprehensive performance summary
+"""
+function get_performance_summary(metrics::Any)
+    summary = Dict{String, Any}()
+    
+    # Basic information
+    summary["process_rank"] = metrics.process_rank
+    summary["n_processes"] = metrics.n_processes
+    summary["n_threads_per_process"] = metrics.n_threads_per_process
+    summary["parareal_iterations"] = metrics.parareal_iterations
+    
+    # Timing information
+    summary["total_wall_time"] = metrics.total_wall_time
+    summary["sequential_reference_time"] = metrics.sequential_reference_time
+    summary["convergence_time"] = metrics.convergence_time
+    
+    # Solver timing breakdown
+    summary["coarse_solver_time"] = metrics.timing_data.coarse_solver_time
+    summary["fine_solver_time"] = metrics.timing_data.fine_solver_time
+    summary["coarse_solver_calls"] = metrics.timing_data.coarse_solver_calls
+    summary["fine_solver_calls"] = metrics.timing_data.fine_solver_calls
+    summary["interpolation_time"] = metrics.timing_data.interpolation_time
+    summary["restriction_time"] = metrics.timing_data.restriction_time
+    summary["total_solver_time"] = metrics.timing_data.total_solver_time
+    
+    # Communication metrics
+    summary["total_communication_time"] = metrics.communication_metrics.total_communication_time
+    summary["send_time"] = metrics.communication_metrics.send_time
+    summary["receive_time"] = metrics.communication_metrics.receive_time
+    summary["synchronization_time"] = metrics.communication_metrics.synchronization_time
+    summary["broadcast_time"] = metrics.communication_metrics.broadcast_time
+    summary["allreduce_time"] = metrics.communication_metrics.allreduce_time
+    summary["message_count"] = metrics.communication_metrics.message_count
+    summary["bytes_transferred"] = metrics.communication_metrics.bytes_transferred
+    
+    # Efficiency metrics
+    summary["speedup_factor"] = metrics.efficiency_metrics.speedup_factor
+    summary["parallel_efficiency"] = metrics.efficiency_metrics.parallel_efficiency
+    summary["strong_scaling_efficiency"] = metrics.efficiency_metrics.strong_scaling_efficiency
+    summary["weak_scaling_efficiency"] = metrics.efficiency_metrics.weak_scaling_efficiency
+    summary["load_balance_factor"] = metrics.efficiency_metrics.load_balance_factor
+    summary["communication_overhead_ratio"] = metrics.efficiency_metrics.communication_overhead_ratio
+    
+    # Memory usage
+    summary["peak_memory_usage_mb"] = metrics.peak_memory_usage_mb
+    summary["average_memory_usage_mb"] = metrics.average_memory_usage_mb
+    
+    # Derived metrics
+    if metrics.timing_data.coarse_solver_calls > 0
+        summary["average_coarse_solver_time"] = 
+            metrics.timing_data.coarse_solver_time / metrics.timing_data.coarse_solver_calls
+    else
+        summary["average_coarse_solver_time"] = T(0.0)
+    end
+    
+    if metrics.timing_data.fine_solver_calls > 0
+        summary["average_fine_solver_time"] = 
+            metrics.timing_data.fine_solver_time / metrics.timing_data.fine_solver_calls
+    else
+        summary["average_fine_solver_time"] = T(0.0)
+    end
+    
+    if metrics.communication_metrics.message_count > 0
+        summary["average_message_size_bytes"] = 
+            metrics.communication_metrics.bytes_transferred / metrics.communication_metrics.message_count
+        summary["average_communication_time_per_message"] = 
+            metrics.communication_metrics.total_communication_time / metrics.communication_metrics.message_count
+    else
+        summary["average_message_size_bytes"] = 0
+        summary["average_communication_time_per_message"] = T(0.0)
+    end
+    
+    # Timestamps
+    summary["start_timestamp"] = metrics.start_timestamp
+    summary["end_timestamp"] = metrics.end_timestamp
+    
+    return summary
+end
+
+"""
+Reset performance metrics for new computation
+"""
+function reset_performance_metrics!(metrics::Any)
+    # Reset timing data
+    metrics.timing_data.coarse_solver_time = 0.0
+    metrics.timing_data.fine_solver_time = 0.0
+    metrics.timing_data.coarse_solver_calls = 0
+    metrics.timing_data.fine_solver_calls = 0
+    metrics.timing_data.interpolation_time = 0.0
+    metrics.timing_data.restriction_time = 0.0
+    metrics.timing_data.total_solver_time = 0.0
+    
+    # Reset communication metrics
+    metrics.communication_metrics.send_time = 0.0
+    metrics.communication_metrics.receive_time = 0.0
+    metrics.communication_metrics.synchronization_time = 0.0
+    metrics.communication_metrics.broadcast_time = 0.0
+    metrics.communication_metrics.allreduce_time = 0.0
+    metrics.communication_metrics.total_communication_time = 0.0
+    metrics.communication_metrics.message_count = 0
+    metrics.communication_metrics.bytes_transferred = 0
+    
+    # Reset efficiency metrics
+    metrics.efficiency_metrics.parallel_efficiency = 0.0
+    metrics.efficiency_metrics.strong_scaling_efficiency = 0.0
+    metrics.efficiency_metrics.weak_scaling_efficiency = 0.0
+    metrics.efficiency_metrics.speedup_factor = 0.0
+    metrics.efficiency_metrics.load_balance_factor = 0.0
+    metrics.efficiency_metrics.communication_overhead_ratio = 0.0
+    
+    # Reset overall metrics
+    metrics.total_wall_time = 0.0
+    metrics.sequential_reference_time = 0.0
+    metrics.parareal_iterations = 0
+    metrics.convergence_time = 0.0
+    metrics.peak_memory_usage_mb = 0.0
+    metrics.average_memory_usage_mb = 0.0
+    
+    # Reset timestamps
+    metrics.start_timestamp = now()
+    metrics.end_timestamp = nothing
+    
+    return nothing
+end
+
+"""
+Merge performance metrics from multiple processes
+"""
+function merge_performance_metrics(metrics_list::Vector{Any})
+    if isempty(metrics_list)
+        error("Cannot merge empty metrics list")
+    end
+    
+    # Use first metrics as base
+    merged = deepcopy(metrics_list[1])
+    
+    # Aggregate timing data (sum across processes)
+    for i in 2:length(metrics_list)
+        m = metrics_list[i]
+        merged.timing_data.coarse_solver_time += m.timing_data.coarse_solver_time
+        merged.timing_data.fine_solver_time += m.timing_data.fine_solver_time
+        merged.timing_data.coarse_solver_calls += m.timing_data.coarse_solver_calls
+        merged.timing_data.fine_solver_calls += m.timing_data.fine_solver_calls
+        merged.timing_data.interpolation_time += m.timing_data.interpolation_time
+        merged.timing_data.restriction_time += m.timing_data.restriction_time
+        merged.timing_data.total_solver_time += m.timing_data.total_solver_time
+    end
+    
+    # Aggregate communication metrics (sum across processes)
+    for i in 2:length(metrics_list)
+        m = metrics_list[i]
+        merged.communication_metrics.send_time += m.communication_metrics.send_time
+        merged.communication_metrics.receive_time += m.communication_metrics.receive_time
+        merged.communication_metrics.synchronization_time += m.communication_metrics.synchronization_time
+        merged.communication_metrics.broadcast_time += m.communication_metrics.broadcast_time
+        merged.communication_metrics.allreduce_time += m.communication_metrics.allreduce_time
+        merged.communication_metrics.total_communication_time += m.communication_metrics.total_communication_time
+        merged.communication_metrics.message_count += m.communication_metrics.message_count
+        merged.communication_metrics.bytes_transferred += m.communication_metrics.bytes_transferred
+    end
+    
+    # Take maximum wall time and memory usage
+    for i in 2:length(metrics_list)
+        m = metrics_list[i]
+        merged.total_wall_time = max(merged.total_wall_time, m.total_wall_time)
+        merged.peak_memory_usage_mb = max(merged.peak_memory_usage_mb, m.peak_memory_usage_mb)
+        merged.average_memory_usage_mb = max(merged.average_memory_usage_mb, m.average_memory_usage_mb)
+    end
+    
+    # Take maximum iterations and convergence time
+    for i in 2:length(metrics_list)
+        m = metrics_list[i]
+        merged.parareal_iterations = max(merged.parareal_iterations, m.parareal_iterations)
+        merged.convergence_time = max(merged.convergence_time, m.convergence_time)
+    end
+    
+    # Recalculate efficiency metrics for merged data
+    calculate_efficiency_metrics!(merged, merged.sequential_reference_time)
+    
+    # Set process information to reflect merged nature
+    merged.process_rank = -1  # Indicates merged metrics
+    merged.n_processes = length(metrics_list)
+    
+    return merged
+end
+
+"""
+Print formatted performance report
+"""
+function print_performance_report(metrics::Any)
+    summary = get_performance_summary(metrics)
+    
+    println("=== Parareal Performance Report ===")
+    println("Process Information:")
+    println("  Rank: $(summary["process_rank"])")
+    println("  Total processes: $(summary["n_processes"])")
+    println("  Threads per process: $(summary["n_threads_per_process"])")
+    println("  Parareal iterations: $(summary["parareal_iterations"])")
+    println()
+    
+    println("Timing Breakdown:")
+    println("  Total wall time: $(round(summary["total_wall_time"], digits=3)) s")
+    println("  Sequential reference: $(round(summary["sequential_reference_time"], digits=3)) s")
+    println("  Convergence time: $(round(summary["convergence_time"], digits=3)) s")
+    println("  Coarse solver time: $(round(summary["coarse_solver_time"], digits=3)) s ($(summary["coarse_solver_calls"]) calls)")
+    println("  Fine solver time: $(round(summary["fine_solver_time"], digits=3)) s ($(summary["fine_solver_calls"]) calls)")
+    println("  Interpolation time: $(round(summary["interpolation_time"], digits=3)) s")
+    println("  Restriction time: $(round(summary["restriction_time"], digits=3)) s")
+    println()
+    
+    println("Communication Metrics:")
+    println("  Total communication time: $(round(summary["total_communication_time"], digits=3)) s")
+    println("  Send time: $(round(summary["send_time"], digits=3)) s")
+    println("  Receive time: $(round(summary["receive_time"], digits=3)) s")
+    println("  Synchronization time: $(round(summary["synchronization_time"], digits=3)) s")
+    println("  Messages sent: $(summary["message_count"])")
+    println("  Bytes transferred: $(summary["bytes_transferred"])")
+    println()
+    
+    println("Efficiency Metrics:")
+    println("  Speedup factor: $(round(summary["speedup_factor"], digits=2))x")
+    println("  Parallel efficiency: $(round(summary["parallel_efficiency"] * 100, digits=1))%")
+    println("  Load balance factor: $(round(summary["load_balance_factor"], digits=3))")
+    println("  Communication overhead: $(round(summary["communication_overhead_ratio"] * 100, digits=1))%")
+    println()
+    
+    println("Memory Usage:")
+    println("  Peak memory: $(round(summary["peak_memory_usage_mb"], digits=1)) MB")
+    println("  Average memory: $(round(summary["average_memory_usage_mb"], digits=1)) MB")
+    println("===================================")
+end
+
+"""
+Measure execution time of a function and update performance metrics
+"""
+function measure_and_record!(metrics::Any, 
+                           operation_type::Symbol, 
+                           func::Function, 
+                           args...)
+    
+    start_time = time_ns()
+    result = func(args...)
+    end_time = time_ns()
+    
+    execution_time = (end_time - start_time) / 1e9  # Convert to seconds
+    
+    if operation_type in [:coarse, :fine, :interpolation, :restriction]
+        update_timing_data!(metrics, operation_type, execution_time)
+    elseif operation_type in [:send, :receive, :synchronization, :broadcast, :allreduce]
+        record_communication_overhead!(metrics, operation_type, execution_time)
+    end
+    
+    return result
 end
 
 end # module Parareal
