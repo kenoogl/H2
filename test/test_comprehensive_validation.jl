@@ -239,7 +239,7 @@ end
                         
                         parareal_result = Parareal.PararealResult{Float64}(
                             test_solution, true, 5, 
-                            [test_case.error_level * (10.0^(-i)) for i in 0:4], 1.0, 0.1
+                            [test_case.error_level * (10.0^(-i)) for i in 0:4], 1.0, 0.1, nothing
                         )
                         
                         validation_result = Parareal.validate_against_sequential!(
@@ -274,7 +274,7 @@ end
                         config = Parareal.PararealConfig{Float64}(max_iterations = iteration)
                         parareal_result = Parareal.PararealResult{Float64}(
                             test_solution, true, iteration, 
-                            [1e-3 / (i+1) for i in 0:iteration-1], 1.0, 0.1
+                            [1e-3 / (i+1) for i in 0:iteration-1], 1.0, 0.1, nothing
                         )
                         
                         validation_result = Parareal.validate_against_sequential!(
@@ -326,7 +326,7 @@ end
                     
                     config = Parareal.PararealConfig{Float64}()
                     parareal_result = Parareal.PararealResult{Float64}(
-                        test_solution, true, i, [error_level], 1.0, 0.1
+                        test_solution, true, i, [error_level], 1.0, 0.1, nothing
                     )
                     
                     validation_result = Parareal.validate_against_sequential!(
@@ -394,7 +394,7 @@ end
                         
                         config = Parareal.PararealConfig{Float64}()
                         parareal_result = Parareal.PararealResult{Float64}(
-                            parareal_solution, true, 5, [1e-2, 1e-3, 1e-4, 1e-5, 1e-6], 1.0, 0.1
+                            parareal_solution, true, 5, [1e-2, 1e-3, 1e-4, 1e-5, 1e-6], 1.0, 0.1, nothing
                         )
                         
                         validation_result = Parareal.validate_against_sequential!(
@@ -552,7 +552,7 @@ end
                 )
                 
                 parareal_result = Parareal.PararealResult{Float64}(
-                    parareal_solution, true, 5, [1e-2, 1e-3, 1e-4, 1e-5, 1e-6], 1.0, 0.1
+                    parareal_solution, true, 5, [1e-2, 1e-3, 1e-4, 1e-5, 1e-6], 1.0, 0.1, nothing
                 )
                 
                 # Validate
@@ -630,7 +630,7 @@ end
                 
                 config = Parareal.PararealConfig{Float64}(total_time = 0.005)
                 parareal_result = Parareal.PararealResult{Float64}(
-                    parareal_solution, true, 3, [1e-3, 1e-6, 1e-8], 1.0, 0.1
+                    parareal_solution, true, 3, [1e-3, 1e-6, 1e-8], 1.0, 0.1, nothing
                 )
                 
                 # Validate extreme case
@@ -680,7 +680,7 @@ end
                 
                 config = Parareal.PararealConfig{Float64}()
                 parareal_result = Parareal.PararealResult{Float64}(
-                    parareal_data, true, 5, [1e-1, 1e-2, 1e-3, 1e-4, 1e-5], 1.0, 0.1
+                    parareal_data, true, 5, [1e-1, 1e-2, 1e-3, 1e-4, 1e-5], 1.0, 0.1, nothing
                 )
                 
                 validation_result = Parareal.validate_against_sequential!(
@@ -729,7 +729,7 @@ end
                 
                 config = Parareal.PararealConfig{Float64}()
                 parareal_result = Parareal.PararealResult{Float64}(
-                    parareal_data, true, length(pattern.history), pattern.history, 1.0, 0.1
+                    parareal_data, true, length(pattern.history), pattern.history, 1.0, 0.1, nothing
                 )
                 
                 validation_result = Parareal.validate_against_sequential!(

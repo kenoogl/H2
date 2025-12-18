@@ -15,6 +15,11 @@ using .Parareal
 using .OutputFormat
 using .Common
 
+# Import specific functions to avoid namespace conflicts
+import .OutputFormat: create_output_manager, generate_parareal_output!, ensure_output_consistency!
+import .OutputFormat: export_parareal_results, create_output_metadata, create_output_filename, compare_output_formats
+import .OutputFormat: OutputConfiguration, ensure_output_consistency_with_comparison!
+
 # ============================================================================
 # Helper Functions for Output Format Testing (defined first)
 # ============================================================================
@@ -217,7 +222,7 @@ Requirement 3.4: Generate output in the same format as sequential computation
             )
             
             # Generate parareal outputs
-            generated_files = generate_parareal_output!(manager, test_temperature, test_result)
+            generated_files = generate_parareal_output!(manager, test_temperature, test_result, nothing)
             
             @test begin
                 # Verify files were generated
@@ -293,13 +298,13 @@ Requirement 3.4: Generate output in the same format as sequential computation
                 output_directory = test_dir
             )
             
-            parareal_files = generate_parareal_output!(manager, test_temperature, test_result)
+            parareal_files = generate_parareal_output!(manager, test_temperature, test_result, nothing)
             
             # Test format consistency
             @test begin
                 try
                     # Ensure output consistency
-                    is_consistent = ensure_output_consistency!(manager, sequential_files)
+                    is_consistent = ensure_output_consistency_with_comparison!(manager, sequential_files)
                     is_consistent
                     
                 catch e
@@ -425,7 +430,7 @@ Requirement 3.4: Generate output in the same format as sequential computation
                 manager = create_output_manager()
                 
                 # Should handle gracefully
-                generated_files = generate_parareal_output!(manager, empty_temp, nothing)
+                generated_files = generate_parareal_output!(manager, empty_temp, nothing, nothing)
                 
                 # Should not crash, may generate empty or minimal files
                 true
@@ -444,7 +449,7 @@ Requirement 3.4: Generate output in the same format as sequential computation
                 manager = create_output_manager(output_directory = nonexistent_dir)
                 
                 # Should handle missing directory gracefully
-                generated_files = generate_parareal_output!(manager, test_temperature, test_result)
+                generated_files = generate_parareal_output!(manager, test_temperature, test_result, nothing)
                 
                 # May fail, but should not crash the program
                 true

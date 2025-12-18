@@ -39,7 +39,7 @@ Validates: Requirements 5.4, 5.5
                     
                     config = Parareal.PararealConfig{Float64}()
                     parareal_result = Parareal.PararealResult{Float64}(
-                        parareal_solution, true, i, [1e-2, 1e-3, 1e-4], 1.0, 0.1
+                        parareal_solution, true, i, [1e-2, 1e-3, 1e-4], 1.0, 0.1, nothing
                     )
                     
                     validation_result = Parareal.validate_against_sequential!(
@@ -84,7 +84,7 @@ Validates: Requirements 5.4, 5.5
                     
                     config = Parareal.PararealConfig{Float64}()
                     parareal_result = Parareal.PararealResult{Float64}(
-                        parareal_solution, true, 3, [1e-1, 1e-2, 1e-3], 1.0, 0.1
+                        parareal_solution, true, 3, [1e-1, 1e-2, 1e-3], 1.0, 0.1, nothing
                     )
                     
                     validation_result = Parareal.validate_against_sequential!(
@@ -243,7 +243,7 @@ Validates: Requirements 5.4, 5.5
                     # Ensure we don't exceed the available error history
                     error_history = exponential_errors[1:min(i+1, length(exponential_errors))]
                     parareal_result = Parareal.PararealResult{Float64}(
-                        parareal_solution, true, i+1, error_history, 1.0, 0.1
+                        parareal_solution, true, i+1, error_history, 1.0, 0.1, nothing
                     )
                     
                     validation_result = Parareal.validate_against_sequential!(
@@ -288,7 +288,7 @@ Validates: Requirements 5.4, 5.5
                 
                 config = Parareal.PararealConfig{Float64}()
                 parareal_result = Parareal.PararealResult{Float64}(
-                    parareal_solution, true, 1, [machine_precision_error], 1.0, 0.1
+                    parareal_solution, true, 1, [machine_precision_error], 1.0, 0.1, nothing
                 )
                 
                 validation_result = Parareal.validate_against_sequential!(
@@ -319,7 +319,7 @@ Validates: Requirements 5.4, 5.5
                 
                 config = Parareal.PararealConfig{Float64}()
                 parareal_result = Parareal.PararealResult{Float64}(
-                    degraded_solution, true, 100, [1e-1, 1e-2, 1e-3], 1.0, 0.1
+                    degraded_solution, true, 100, [1e-1, 1e-2, 1e-3], 1.0, 0.1, nothing
                 )
                 
                 validation_result = Parareal.validate_against_sequential!(
@@ -371,7 +371,7 @@ Validates: Requirements 5.4, 5.5
                     config = Parareal.PararealConfig{Float64}(max_iterations = iterations)
                     parareal_result = Parareal.PararealResult{Float64}(
                         parareal_solution, true, iterations, 
-                        [base_error / (i+1) for i in 0:iterations-1], 1.0, 0.1
+                        [base_error / (i+1) for i in 0:iterations-1], 1.0, 0.1, nothing
                     )
                     
                     validation_result = Parareal.validate_against_sequential!(
@@ -424,7 +424,7 @@ Validates: Requirements 5.4, 5.5
                     
                     config = Parareal.PararealConfig{Float64}(total_time = sim_time)
                     parareal_result = Parareal.PararealResult{Float64}(
-                        parareal_solution, true, 5, [1e-1, 1e-2, 1e-3, 1e-4, 1e-5], 1.0, 0.1
+                        parareal_solution, true, 5, [1e-1, 1e-2, 1e-3, 1e-4, 1e-5], 1.0, 0.1, nothing
                     )
                     
                     validation_result = Parareal.validate_against_sequential!(
@@ -495,7 +495,7 @@ Validates: Requirements 5.4, 5.5
                 
                 parareal_result = Parareal.PararealResult{Float64}(
                     parareal_solution, true, 8, 
-                    [1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8], 1.0, 0.1
+                    [1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8], 1.0, 0.1, nothing
                 )
                 
                 validation_result = Parareal.validate_against_sequential!(

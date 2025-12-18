@@ -138,7 +138,7 @@ using .Parareal
         @test haskey(breakdown.mpi_communication_breakdown, "send_time")
         @test haskey(breakdown.mpi_communication_breakdown, "receive_time")
         @test haskey(breakdown.mpi_communication_breakdown, "synchronization_time")
-        @test haskey(breakdown.mpi_communication_breakdown, "total_time")
+        @test haskey(breakdown.mpi_communication_breakdown, "total_communication_time")
         
         expected_send_time = 0.3 + 0.4
         expected_receive_time = 0.2 + 0.25
@@ -148,7 +148,7 @@ using .Parareal
         @test breakdown.mpi_communication_breakdown["send_time"] ≈ expected_send_time
         @test breakdown.mpi_communication_breakdown["receive_time"] ≈ expected_receive_time
         @test breakdown.mpi_communication_breakdown["synchronization_time"] ≈ expected_sync_time
-        @test breakdown.mpi_communication_breakdown["total_time"] ≈ expected_total_comm
+        @test breakdown.mpi_communication_breakdown["total_communication_time"] ≈ expected_total_comm
     end
     
     @testset "Scalability Metrics Calculation (Requirements 4.4, 4.5)" begin

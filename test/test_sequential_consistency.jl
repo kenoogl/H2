@@ -413,7 +413,7 @@ Validates: Requirements 5.1, 5.2, 5.3
                     
                     # Create mock parareal result
                     parareal_result = Parareal.PararealResult{Float64}(
-                        parareal_data, true, 3, [1e-1, 1e-2, 1e-3], 1.0, 0.1
+                        parareal_data, true, 3, [1e-1, 1e-2, 1e-3], 1.0, 0.1, nothing
                     )
                     
                     validation_result = Parareal.validate_against_sequential!(

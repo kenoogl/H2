@@ -323,7 +323,7 @@ Validates: Requirements 5.1, 5.2, 5.3, 5.4, 5.5
             # Test the comprehensive report function from test_comprehensive_validation.jl
             # Load the function from the comprehensive validation test file
             include("test_comprehensive_validation.jl")
-            comprehensive_report = Main.create_error_analysis_report(validation_results)
+            comprehensive_report = create_error_analysis_report(validation_results)
             
             @test comprehensive_report isa String
             @test length(comprehensive_report) > 500  # Should be comprehensive
@@ -345,7 +345,7 @@ Validates: Requirements 5.1, 5.2, 5.3, 5.4, 5.5
         @testset "Empty and edge case reports" begin
             # Test with empty validation results
             empty_results = Parareal.ValidationResult{Float64}[]
-            empty_report = Main.create_error_analysis_report(empty_results)
+            empty_report = create_error_analysis_report(empty_results)
             
             @test empty_report isa String
             @test occursin("No validation results", empty_report)
@@ -368,7 +368,7 @@ Validates: Requirements 5.1, 5.2, 5.3, 5.4, 5.5
                 ["Excellent performance"]
             )
             
-            single_report = Main.create_error_analysis_report([single_result])
+            single_report = create_error_analysis_report([single_result])
             
             @test single_report isa String
             @test occursin("Total validation runs: 1", single_report)
@@ -450,7 +450,7 @@ Validates: Requirements 5.1, 5.2, 5.3, 5.4, 5.5
                 
                 config = Parareal.PararealConfig{Float64}()
                 parareal_result = Parareal.PararealResult{Float64}(
-                    test_solution, true, 5, [1e-2, 1e-3, 1e-4, 1e-5, 1e-6], 1.0, 0.1
+                    test_solution, true, 5, [1e-2, 1e-3, 1e-4, 1e-5, 1e-6], 1.0, 0.1, nothing
                 )
                 
                 validation_result = Parareal.validate_against_sequential!(

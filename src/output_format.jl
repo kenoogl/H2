@@ -15,7 +15,9 @@ module OutputFormat
 using Printf
 using Dates
 
-export OutputManager, create_output_manager, generate_parareal_output!, ensure_output_consistency!
+export OutputManager, OutputConfiguration, OutputMetadata, create_output_manager, generate_parareal_output!, ensure_output_consistency!
+export export_parareal_results, create_output_metadata, create_output_filename, compare_output_formats
+export ensure_output_consistency_with_comparison!
 
 """
 Configuration for output generation
@@ -25,6 +27,34 @@ struct OutputConfig
     computation_mode::String  # "sequential" or "parareal"
     include_metadata::Bool
     maintain_compatibility::Bool
+    output_directory::String
+end
+
+"""
+Extended output configuration with detailed control
+"""
+struct OutputConfiguration
+    base_filename::String
+    enable_log_output::Bool
+    enable_convergence_output::Bool
+    enable_temperature_output::Bool
+    enable_performance_output::Bool
+    enable_plot_output::Bool
+    output_directory::String
+    
+    function OutputConfiguration(;
+        base_filename::String = "heat3ds",
+        enable_log_output::Bool = true,
+        enable_convergence_output::Bool = true,
+        enable_temperature_output::Bool = true,
+        enable_performance_output::Bool = false,
+        enable_plot_output::Bool = false,
+        output_directory::String = "."
+    )
+        return new(base_filename, enable_log_output, enable_convergence_output,
+                  enable_temperature_output, enable_performance_output,
+                  enable_plot_output, output_directory)
+    end
 end
 
 """
@@ -38,13 +68,28 @@ struct OutputMetadata
     parareal_iterations::Int
     convergence_achieved::Bool
     computation_time::Float64
+    computation_mode::String
+    
+    function OutputMetadata(
+        timestamp::DateTime,
+        grid_size::Tuple{Int,Int,Int},
+        n_time_windows::Int,
+        n_mpi_processes::Int,
+        parareal_iterations::Int,
+        convergence_achieved::Bool,
+        computation_time::Float64,
+        computation_mode::String = "parareal"
+    )
+        return new(timestamp, grid_size, n_time_windows, n_mpi_processes,
+                  parareal_iterations, convergence_achieved, computation_time, computation_mode)
+    end
 end
 
 """
 OutputManager manages the generation of Heat3ds-compatible output files
 for parareal computations.
 """
-struct OutputManager
+mutable struct OutputManager
     config::OutputConfig
     metadata::OutputMetadata
     file_registry::Vector{String}
@@ -70,14 +115,16 @@ function create_output_manager(;
     n_time_windows::Int = 1,
     n_mpi_processes::Int = 1,
     include_metadata::Bool = true,
-    maintain_compatibility::Bool = true
+    maintain_compatibility::Bool = true,
+    output_directory::String = "."
 )
     
     config = OutputConfig(
         base_filename,
         computation_mode,
         include_metadata,
-        maintain_compatibility
+        maintain_compatibility,
+        output_directory
     )
     
     metadata = OutputMetadata(
@@ -87,7 +134,8 @@ function create_output_manager(;
         n_mpi_processes,
         0,  # Will be updated later
         false,  # Will be updated later
-        0.0  # Will be updated later
+        0.0,  # Will be updated later
+        computation_mode
     )
     
     return OutputManager(config, metadata, String[])
@@ -112,20 +160,39 @@ function generate_parareal_output!(
     manager::OutputManager,
     temperature_field::Array{Float64,3},
     result,
-    problem_data
+    problem_data = nothing
 )
     generated_files = String[]
     
     try
         # Update metadata with actual computation results
+        iterations = if result !== nothing && hasfield(typeof(result), :iterations)
+            result.iterations
+        else
+            0
+        end
+        
+        converged = if result !== nothing && hasfield(typeof(result), :converged)
+            result.converged
+        else
+            false
+        end
+        
+        computation_time = if result !== nothing && hasfield(typeof(result), :computation_time)
+            result.computation_time
+        else
+            0.0
+        end
+        
         updated_metadata = OutputMetadata(
             manager.metadata.timestamp,
             manager.metadata.grid_size,
             manager.metadata.n_time_windows,
             manager.metadata.n_mpi_processes,
-            get(result, :iterations, 0),
-            get(result, :converged, false),
-            get(result, :computation_time, 0.0)
+            iterations,
+            converged,
+            computation_time,
+            manager.metadata.computation_mode
         )
         
         # Generate temperature data files in Heat3ds format
@@ -133,7 +200,7 @@ function generate_parareal_output!(
         append!(generated_files, temp_files)
         
         # Generate convergence data files (if applicable)
-        if haskey(result, :residual_history) && !isempty(get(result, :residual_history, []))
+        if result !== nothing && hasfield(typeof(result), :residual_history) && !isempty(result.residual_history)
             conv_files = generate_convergence_output(manager, result, updated_metadata)
             append!(generated_files, conv_files)
         end
@@ -168,8 +235,12 @@ function generate_temperature_output(
     try
         # Generate binary temperature data file (Heat3ds standard format)
         temp_filename = "$(manager.config.base_filename)_temperature.dat"
+        temp_filepath = joinpath(manager.config.output_directory, temp_filename)
         
-        open(temp_filename, "w") do f
+        # Ensure output directory exists
+        mkpath(manager.config.output_directory)
+        
+        open(temp_filepath, "w") do f
             # Write header in Heat3ds format
             write(f, Int32(metadata.grid_size[1]))  # NX
             write(f, Int32(metadata.grid_size[2]))  # NY  
@@ -184,8 +255,9 @@ function generate_temperature_output(
         
         # Generate CSV temperature data file (for compatibility)
         csv_filename = "$(manager.config.base_filename)_temperature.csv"
+        csv_filepath = joinpath(manager.config.output_directory, csv_filename)
         
-        open(csv_filename, "w") do f
+        open(csv_filepath, "w") do f
             # Write CSV header
             println(f, "# Heat3ds Temperature Data")
             println(f, "# Grid: $(metadata.grid_size[1])x$(metadata.grid_size[2])x$(metadata.grid_size[3])")
@@ -230,8 +302,12 @@ function generate_convergence_output(
     try
         # Generate convergence CSV file (Heat3ds standard format)
         conv_filename = "$(manager.config.base_filename)_convergence.csv"
+        conv_filepath = joinpath(manager.config.output_directory, conv_filename)
         
-        open(conv_filename, "w") do f
+        # Ensure output directory exists
+        mkpath(manager.config.output_directory)
+        
+        open(conv_filepath, "w") do f
             # Write header in Heat3ds format
             println(f, "# Heat3ds Convergence Data")
             println(f, "# Grid: $(metadata.grid_size[1])x$(metadata.grid_size[2])x$(metadata.grid_size[3])")
@@ -244,7 +320,12 @@ function generate_convergence_output(
             println(f, "iteration,residual")
             
             # Write convergence data
-            residual_history = get(result, :residual_history, Float64[])
+            residual_history = if result !== nothing && hasfield(typeof(result), :residual_history)
+                result.residual_history
+            else
+                Float64[]
+            end
+            
             if !isempty(residual_history)
                 for (i, residual) in enumerate(residual_history)
                     println(f, "$i,$residual")
@@ -273,9 +354,13 @@ function generate_metadata_output(
     metadata::OutputMetadata
 )
     metadata_filename = "$(manager.config.base_filename)_parareal_metadata.json"
+    metadata_filepath = joinpath(manager.config.output_directory, metadata_filename)
     
     try
-        open(metadata_filename, "w") do f
+        # Ensure output directory exists
+        mkpath(manager.config.output_directory)
+        
+        open(metadata_filepath, "w") do f
             # Write JSON metadata
             println(f, "{")
             println(f, "  \"computation_mode\": \"$(manager.config.computation_mode)\",")
@@ -319,8 +404,9 @@ function ensure_output_consistency!(manager::OutputManager)
         ]
         
         for file in required_files
-            if !isfile(file)
-                @warn "Required output file missing: $file"
+            filepath = joinpath(manager.config.output_directory, file)
+            if !isfile(filepath)
+                @warn "Required output file missing: $filepath"
                 return false
             end
         end
@@ -350,8 +436,8 @@ Validate temperature file format consistency.
 """
 function validate_temperature_format(manager::OutputManager)
     try
-        temp_dat_file = "$(manager.config.base_filename)_temperature.dat"
-        temp_csv_file = "$(manager.config.base_filename)_temperature.csv"
+        temp_dat_file = joinpath(manager.config.output_directory, "$(manager.config.base_filename)_temperature.dat")
+        temp_csv_file = joinpath(manager.config.output_directory, "$(manager.config.base_filename)_temperature.csv")
         
         # Check binary file format
         if isfile(temp_dat_file)
@@ -393,16 +479,17 @@ Validate output file sizes are reasonable.
 function validate_file_sizes(manager::OutputManager)
     try
         for file in manager.file_registry
-            if isfile(file)
-                size_bytes = filesize(file)
+            filepath = joinpath(manager.config.output_directory, file)
+            if isfile(filepath)
+                size_bytes = filesize(filepath)
                 if size_bytes == 0
-                    @warn "Output file is empty: $file"
+                    @warn "Output file is empty: $filepath"
                     return false
                 end
                 
                 # Check for unreasonably large files (> 1GB)
                 if size_bytes > 1_000_000_000
-                    @warn "Output file suspiciously large: $file ($(size_bytes) bytes)"
+                    @warn "Output file suspiciously large: $filepath ($(size_bytes) bytes)"
                     return false
                 end
             end
@@ -412,6 +499,210 @@ function validate_file_sizes(manager::OutputManager)
         
     catch e
         @error "File size validation failed: $e"
+        return false
+    end
+end
+
+"""
+Export parareal results in Heat3ds-compatible format.
+
+This is the main interface function for generating all output files.
+"""
+function export_parareal_results(
+    temperature_field::Array{Float64,3},
+    result,
+    config;
+    output_directory::String = ".",
+    base_filename::String = "heat3ds_parareal"
+)
+    try
+        # Extract configuration values safely
+        n_time_windows = if hasfield(typeof(config), :n_time_windows)
+            config.n_time_windows
+        else
+            1
+        end
+        
+        n_mpi_processes = if hasfield(typeof(config), :n_mpi_processes)
+            config.n_mpi_processes
+        else
+            1
+        end
+        
+        # Create output manager
+        manager = create_output_manager(
+            base_filename = base_filename,
+            computation_mode = "parareal",
+            grid_size = size(temperature_field),
+            n_time_windows = n_time_windows,
+            n_mpi_processes = n_mpi_processes,
+            output_directory = output_directory
+        )
+        
+        # Generate output files
+        generated_files = generate_parareal_output!(manager, temperature_field, result, nothing)
+        
+        # Check consistency
+        is_consistent = ensure_output_consistency!(manager)
+        
+        return generated_files, is_consistent
+        
+    catch e
+        @error "Failed to export parareal results: $e"
+        return String[], false
+    end
+end
+
+"""
+Create output metadata from parareal configuration and results.
+"""
+function create_output_metadata(config, result; computation_mode::String = "parareal")
+    try
+        # Handle different types of config objects
+        grid_size = if hasfield(typeof(config), :grid_size)
+            config.grid_size
+        else
+            (0, 0, 0)
+        end
+        
+        n_time_windows = if hasfield(typeof(config), :n_time_windows)
+            config.n_time_windows
+        else
+            1
+        end
+        
+        n_mpi_processes = if hasfield(typeof(config), :n_mpi_processes)
+            config.n_mpi_processes
+        else
+            1
+        end
+        
+        # Handle different types of result objects
+        iterations = if hasfield(typeof(result), :iterations)
+            result.iterations
+        else
+            0
+        end
+        
+        converged = if hasfield(typeof(result), :converged)
+            result.converged
+        else
+            false
+        end
+        
+        computation_time = if hasfield(typeof(result), :computation_time)
+            result.computation_time
+        else
+            0.0
+        end
+        
+        return OutputMetadata(
+            now(),
+            grid_size,
+            n_time_windows,
+            n_mpi_processes,
+            iterations,
+            converged,
+            computation_time,
+            computation_mode
+        )
+    catch e
+        @error "Failed to create output metadata: $e"
+        return OutputMetadata(now(), (0, 0, 0), 1, 1, 0, false, 0.0, computation_mode)
+    end
+end
+
+"""
+Create consistent output filename based on manager configuration.
+"""
+function create_output_filename(manager::OutputManager, file_type::String, extension::String)
+    try
+        base = manager.config.base_filename
+        mode = manager.config.computation_mode
+        
+        if mode == "parareal"
+            return "$(base)_parareal_$(file_type).$(extension)"
+        else
+            return "$(base)_$(file_type).$(extension)"
+        end
+    catch e
+        @error "Failed to create output filename: $e"
+        return "output_$(file_type).$(extension)"
+    end
+end
+
+"""
+Compare output formats between sequential and parareal modes.
+"""
+function compare_output_formats(sequential_files::Vector{String}, parareal_files::Vector{String})
+    comparison_results = Dict{String, Any}()
+    
+    try
+        # Compare file types
+        seq_extensions = Set(splitext(f)[2] for f in sequential_files)
+        par_extensions = Set(splitext(f)[2] for f in parareal_files)
+        
+        comparison_results["file_types_match"] = seq_extensions == par_extensions
+        comparison_results["sequential_extensions"] = collect(seq_extensions)
+        comparison_results["parareal_extensions"] = collect(par_extensions)
+        
+        # Detailed file comparison
+        file_details = Dict{String, Any}()
+        
+        for ext in union(seq_extensions, par_extensions)
+            seq_files_with_ext = filter(f -> endswith(f, ext), sequential_files)
+            par_files_with_ext = filter(f -> endswith(f, ext), parareal_files)
+            
+            file_details[ext] = Dict(
+                "sequential_count" => length(seq_files_with_ext),
+                "parareal_count" => length(par_files_with_ext),
+                "count_match" => length(seq_files_with_ext) == length(par_files_with_ext)
+            )
+        end
+        
+        comparison_results["file_details"] = file_details
+        
+        # Overall compatibility score
+        total_matches = sum(details["count_match"] for details in values(file_details))
+        total_types = length(file_details)
+        comparison_results["compatibility_score"] = total_types > 0 ? total_matches / total_types : 0.0
+        
+        return comparison_results
+        
+    catch e
+        @error "Failed to compare output formats: $e"
+        return Dict("error" => string(e), "file_types_match" => false)
+    end
+end
+
+"""
+Enhanced ensure_output_consistency! with sequential file comparison.
+"""
+function ensure_output_consistency_with_comparison!(manager::OutputManager, sequential_files::Vector{String})
+    try
+        # Basic consistency check
+        basic_consistency = ensure_output_consistency!(manager)
+        
+        if !basic_consistency
+            return false
+        end
+        
+        # If sequential files provided, compare formats
+        if !isempty(sequential_files)
+            comparison = compare_output_formats(sequential_files, manager.file_registry)
+            
+            # Check if formats are reasonably compatible
+            compatibility_threshold = 0.5  # At least 50% of file types should match
+            if get(comparison, "compatibility_score", 0.0) < compatibility_threshold
+                @warn "Output format compatibility below threshold: $(comparison["compatibility_score"])"
+                return false
+            end
+        end
+        
+        return true
+        
+    catch e
+        @error "Enhanced output consistency check failed: $e"
         return false
     end
 end
