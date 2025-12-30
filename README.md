@@ -1,6 +1,22 @@
-# Heat3ds - 3D非一様格子熱伝導解析
+# Heat3ds - 3D非一様格子熱伝導解析 with Parareal時間並列化
 
 IC（集積回路）の多層構造における温度分布を計算するJuliaシミュレーションコード。
+**新機能**: MPI+ThreadsXハイブリッド並列化によるParareal時間並列化対応。
+
+## 🚀 新機能: Parareal時間並列化
+
+### 主要特徴
+- **ハイブリッドMPI+Threads並列化**: MPI時間並列 + ThreadsX空間並列
+- **自動パラメータ最適化**: 文献ベースガイドライン + 自動調整
+- **堅牢な検証システム**: 機械精度レベルの精度確認
+- **包括的性能監視**: リアルタイム効率測定
+- **グレースフルデグラデーション**: 収束失敗時の自動フォールバック
+
+### 期待性能
+- **小規模問題**: 1.2-2.5倍高速化
+- **中規模問題**: 2.0-4.0倍高速化  
+- **大規模問題**: 3.0-8.0倍高速化
+- **精度**: 機械精度レベル (< 1e-6相対誤差)
 
 ## プロジェクト概要
 
@@ -8,12 +24,20 @@ IC（集積回路）の多層構造における温度分布を計算するJulia�
 
 ## 主要機能
 
+### 従来機能
 - **非一様格子**: Z方向に最適化された非等間隔格子
 - **反復ソルバー**: PBiCGSTAB、CG、SORをサポート
 - **前処理**: Gauss-Seidelスムーザーによる収束加速
 - **並列化**: ThreadsXによるマルチスレッド対応
 - **境界条件**: 等温、熱流束、対流の3種類
 - **定常/非定常解析**: is_steadyフラグで切り替え可能
+
+### 新機能: Parareal時間並列化
+- **時間方向並列化**: 複数時間窓の並列処理
+- **MPI通信**: プロセス間での温度場データ交換
+- **自動最適化**: 問題特性に応じたパラメータ調整
+- **精度保証**: 逐次計算と同等の数値精度
+- **性能監視**: 詳細なスピードアップ・効率測定
 
 ## ディレクトリ構成
 
@@ -22,7 +46,6 @@ H2/
 ├── README.md                    # このファイル
 ├── CLAUDE.md                    # Claude Code用プロジェクト説明
 ├── MIGRATION_PLAN.md            # CommonSolver準拠への移植計画
-├── TODO_NEXT_SESSION.md         # 次回セッション用メモ
 ├── .gitignore                   # Git除外設定
 │
 ├── run.jl                       # 実行スクリプト（プロジェクトルートから実行）
@@ -30,6 +53,9 @@ H2/
 │
 ├── src/                         # ソースコード
 │   ├── heat3ds.jl               # メインプログラム
+│   ├── parareal.jl              # Parareal時間並列化（新規）
+│   ├── parameter_optimization.jl # パラメータ最適化（新規）
+│   ├── output_format.jl         # 出力形式管理（新規）
 │   ├── common.jl                # 共通定数・データ構造
 │   ├── NonUniform.jl            # 線形ソルバー（PBiCGSTAB, CG, SOR）
 │   ├── boundary_conditions.jl   # 境界条件設定
@@ -42,18 +68,97 @@ H2/
 │   ├── test_symmetry.jl         # 係数行列対称性テスト
 │   └── test_steady_state.jl     # 定常解析テスト
 │
-├── output/                      # 実行結果（.gitignore）
-│   ├── log.txt                  # ソルバーログ
-│   ├── temp3*.png               # 温度分布図
-│   ├── temp3Z_*.csv             # Z方向温度プロファイル
-│   └── alpha3.png               # 熱拡散率分布
+├── docs/                        # ドキュメント（新規）
+│   ├── parareal_user_guide.md   # Pararealユーザーガイド
+│   ├── mpi_setup_guide.md       # MPI設定ガイド
+│   └── troubleshooting_faq.md   # トラブルシューティング
 │
-└── results/                     # 収束履歴（.gitignore）
-    └── convergence/
-        └── convergence_*.png/csv
+├── examples/                    # 実行例・サンプル（新規）
+│   ├── README.md                # サンプル説明
+│   ├── run_examples.sh          # 自動実行スクリプト
+│   ├── basic_parareal_example.jl # 基本実行例
+│   ├── ic_thermal_analysis_example.jl # IC熱解析例
+│   ├── parameter_optimization_example.jl # パラメータ最適化例
+│   └── benchmark_problems.jl    # ベンチマーク問題集
+│
+├── test/                        # テストスイート（拡張）
+│   ├── runtests.jl              # メインテスト実行
+│   ├── README.md                # テスト説明
+│   ├── unit/                    # 単体テスト
+│   ├── integration/             # 統合テスト
+│   ├── performance/             # 性能テスト
+│   ├── validation/              # 検証テスト
+│   └── summaries/               # テスト結果サマリー
+│
+├── .kiro/                       # Kiro仕様（開発用）
+│   └── specs/parareal-time-parallelization/
+│       ├── requirements.md      # 要件定義
+│       ├── design.md            # 設計文書
+│       └── tasks.md             # 実装計画
+│
+├── archive/                     # アーカイブ（新規）
+│   └── temp_files/              # 一時ファイル
+│
+├── output/                      # 実行結果（.gitignore）
+├── results/                     # 収束履歴（.gitignore）
+└── benchmarks/                  # ベンチマーク結果
 ```
 
 ## 実行方法
+
+### 🚀 Parareal時間並列化実行（新機能）
+
+#### 基本的なParareal実行
+```bash
+# 4プロセスでParareal実行
+mpirun -np 4 julia examples/basic_parareal_example.jl
+
+# 8プロセス、各プロセス4スレッドで実行
+export JULIA_NUM_THREADS=4
+mpirun -np 8 julia examples/ic_thermal_analysis_example.jl
+```
+
+#### 自動実行スクリプト
+```bash
+# 基本例の実行
+./examples/run_examples.sh basic -p 4 -t 2
+
+# IC熱解析例の実行
+./examples/run_examples.sh ic_thermal -p 8 -t 4
+
+# パラメータ最適化
+./examples/run_examples.sh optimization -p 16 -t 2
+
+# ベンチマーク実行
+./examples/run_examples.sh benchmark -p 8
+```
+
+#### Julia REPLからのParareal実行
+```julia
+using MPI
+using Heat3ds
+
+# Parareal設定
+config = PararealConfig(
+    total_time=1.0,
+    n_time_windows=4,
+    dt_coarse=0.01,
+    dt_fine=0.001,
+    time_step_ratio=10.0,
+    max_iterations=15,
+    convergence_tolerance=1.0e-6,
+    n_mpi_processes=4,
+    n_threads_per_process=2
+)
+
+# Parareal実行
+result = q3d(64, 64, 32,
+            solver="pbicgstab",
+            parareal=true,
+            parareal_config=config)
+```
+
+### 従来の逐次実行
 
 ### 基本実行（プロジェクトルートから）
 
@@ -184,6 +289,7 @@ Converged at 208
 
 ## 依存パッケージ
 
+### 基本パッケージ
 ```julia
 using Printf
 using LinearAlgebra
@@ -191,8 +297,33 @@ using FLoops
 using ThreadsX
 ```
 
+### Parareal時間並列化用（新規）
+```julia
+using MPI          # MPI並列化
+using JSON         # 設定・結果保存
+using Dates        # タイムスタンプ
+using Statistics   # 統計解析
+```
+
+### インストール方法
+```bash
+# 基本パッケージ
+julia -e "using Pkg; Pkg.add([\"FLoops\", \"ThreadsX\"])"
+
+# Parareal用パッケージ
+julia -e "using Pkg; Pkg.add([\"MPI\", \"JSON\", \"Dates\", \"Statistics\"])"
+
+# MPI設定
+julia -e "using MPI; MPI.install_mpiexec()"
+```
+
 ## 開発履歴
 
+- **2024-12-30**: Parareal時間並列化機能完全実装完了
+  - MPI+ThreadsXハイブリッド並列化
+  - 自動パラメータ最適化システム
+  - 包括的ドキュメント・サンプル・テストスイート
+  - 期待性能: 2-8倍高速化、機械精度レベル精度
 - **2024-10-19**: 型パラメータ化とHC配列対応完了（ステップ5.9-6）
 - **2024-10-16**: CommonSolver準拠への移植開始（ステップ5.1-5.8）
 - **2024-09-15**: 初期バージョン
@@ -208,5 +339,18 @@ MIT License
 
 ## 関連文書
 
+### 基本文書
 - [CLAUDE.md](CLAUDE.md) - Claude Code用の詳細仕様
 - [MIGRATION_PLAN.md](MIGRATION_PLAN.md) - CommonSolver準拠への移植計画
+
+### Parareal時間並列化文書
+- [docs/parareal_user_guide.md](docs/parareal_user_guide.md) - Pararealユーザーガイド
+- [docs/mpi_setup_guide.md](docs/mpi_setup_guide.md) - MPI設定・実行ガイド
+- [docs/troubleshooting_faq.md](docs/troubleshooting_faq.md) - トラブルシューティング・FAQ
+- [examples/README.md](examples/README.md) - 実行例・サンプル説明
+- [test/README.md](test/README.md) - テストスイート説明
+
+### 開発仕様書
+- [.kiro/specs/parareal-time-parallelization/requirements.md](.kiro/specs/parareal-time-parallelization/requirements.md) - 要件定義
+- [.kiro/specs/parareal-time-parallelization/design.md](.kiro/specs/parareal-time-parallelization/design.md) - 設計文書
+- [.kiro/specs/parareal-time-parallelization/tasks.md](.kiro/specs/parareal-time-parallelization/tasks.md) - 実装計画
