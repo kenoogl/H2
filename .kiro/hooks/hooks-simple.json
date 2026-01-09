@@ -1,0 +1,27 @@
+{
+  "hooks": [
+    {
+      "id": "simple-test-hook",
+      "name": "Simple Test Hook",
+      "description": "Simple test hook to verify hook system works",
+      "trigger": {
+        "type": "task_status_change"
+      },
+      "action": {
+        "type": "shell_script",
+        "script": ".kiro/hooks/simple-test.sh",
+        "args": ["test"],
+        "working_directory": "."
+      },
+      "settings": {
+        "enabled": true,
+        "run_async": false,
+        "log_output": true
+      }
+    }
+  ],
+  "global_settings": {
+    "log_level": "debug",
+    "log_file": ".kiro/hooks/hooks.log"
+  }
+}

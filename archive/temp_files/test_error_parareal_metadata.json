@@ -1,0 +1,11 @@
+{
+  "computation_mode": "parareal",
+  "timestamp": "2025-12-17T22:42:35.178",
+  "grid_size": [1, 1, 1],
+  "n_time_windows": 1,
+  "n_mpi_processes": 1,
+  "parareal_iterations": 0,
+  "convergence_achieved": false,
+  "computation_time": 0.0,
+  "heat3ds_compatible": true
+}
